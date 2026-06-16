@@ -1,0 +1,6 @@
+CREATE NAMESPACE IF NOT EXISTS v1_smoke;
+
+CREATE TABLE IF NOT EXISTS v1_smoke.users (
+  id BIGINT,
+  email STRING
+) USING iceberg;

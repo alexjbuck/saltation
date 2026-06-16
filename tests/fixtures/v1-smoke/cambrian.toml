@@ -1,0 +1,13 @@
+[catalog]
+type                  = "rest"
+uri                   = "http://localhost:8181/catalog"
+warehouse             = "cambrian"
+"s3.endpoint"         = "http://localhost:9000"
+"s3.access-key-id"    = "cambrian-access-key"
+"s3.secret-access-key"= "cambrian-secret-key"
+"s3.region"           = "local"
+"s3.path-style-access"= "true"
+
+[evolutions]
+dir               = "tests/fixtures/v1-smoke"
+sidecar_namespace = "_cambrian_v1_smoke"

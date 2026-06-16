@@ -43,3 +43,71 @@ jobs:
 
       - name: pytest (unit)
         run: uv run pytest tests/unit -n auto
+
+  integration:
+    name: integration (docker-compose rig)
+    needs: lint-type-test
+    runs-on: ubuntu-latest
+    # Single Python pin: the integration suite exercises Lakekeeper +
+    # rustfs over docker-compose, so the matrix sweep from lint-type-test
+    # would add cost without value.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Pin Python 3.12
+        run: uv python pin 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Verify docker compose is available
+        run: docker compose version
+
+      - name: Map host.docker.internal to localhost
+        # The rustfs storage endpoint vended to clients is
+        # http://host.docker.internal:9000 so that both the lakekeeper
+        # container (via host-gateway) and the host-side test process
+        # resolve to the same place. Docker Desktop populates this entry
+        # on macOS/Windows automatically; Linux GHA runners do not.
+        run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+
+      - name: pytest (integration)
+        # The fixture brings the stack up with docker compose up -d
+        # (no --wait, see conftest for the rationale) and tears it down
+        # on exit, so no separate compose step is needed.
+        run: uv run pytest tests/integration -v
+
+      - name: V1 smoke - cambrian apply --json
+        # Re-bring up the stack (pytest's session fixture tore it down on
+        # exit) and exercise the production code path end-to-end: the same
+        # command and JSON-parse pipeline a CI deploy would run.
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv
+          SMOKE_TOML: tests/fixtures/v1-smoke/cambrian.toml
+        run: |
+          docker compose -f docker/compose.yml up -d
+          for _ in $(seq 1 60); do
+            if curl -fsS http://localhost:8181/health >/dev/null 2>&1 \
+              && docker compose -f docker/compose.yml ps -a \
+                  --format '{{.Service}} {{.ExitCode}}' \
+                  | grep -q '^bootstrap 0$'; then
+              break
+            fi
+            sleep 2
+          done
+          uv run cambrian init --path "$SMOKE_TOML"
+          uv run cambrian apply --json --path "$SMOKE_TOML" | tee /tmp/apply.json
+          status=$(jq -r .status /tmp/apply.json)
+          test "$status" = "applied" || test "$status" = "unchanged"
+          uv run cambrian apply --json --path "$SMOKE_TOML" | tee /tmp/apply2.json
+          test "$(jq -r .status /tmp/apply2.json)" = "unchanged"
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yml logs --no-color || true

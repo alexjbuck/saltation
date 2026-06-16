@@ -1,4 +1,4 @@
-"""cambrian — SQL-driven migration runner for Apache Iceberg tables."""
+"""cambrian — SQL-driven evolution runner for Apache Iceberg tables."""
 
 from importlib.metadata import PackageNotFoundError, version
 

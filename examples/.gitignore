@@ -1,0 +1,6 @@
+# The walkthrough generates a `committed/` directory under examples/.
+# Don't check that into the repo - users should produce it themselves.
+committed/
+
+# Local fresh-checkout simulation dir used in Step 6.
+fresh-clone/

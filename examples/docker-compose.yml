@@ -1,0 +1,172 @@
+# Self-contained Iceberg stack for the cambrian walkthrough.
+#
+# Services:
+#   postgres        - backing store for Lakekeeper's metadata
+#   rustfs          - S3-compatible object storage (warehouse data lives here)
+#   rustfs-init     - one-shot: creates the warehouse bucket on rustfs
+#   lakekeeper-migrate - one-shot: runs lakekeeper's schema migrations
+#   lakekeeper      - Iceberg REST catalog
+#   bootstrap       - one-shot: POSTs /bootstrap and /warehouse to Lakekeeper
+#
+# Ports are deliberately shifted off the cambrian integration-test stack
+# (which uses 5432 / 8181 / 9000) so you can run both side-by-side:
+#
+#   service     | host port (example) | host port (test rig)
+#   ------------+---------------------+---------------------
+#   postgres    | 5433                | 5432
+#   lakekeeper  | 9181                | 8181
+#   rustfs      | 9001                | 9000
+#
+# All values below are example-only credentials. Do NOT reuse them in
+# production.
+
+name: cambrian-example
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: lakekeeper
+      POSTGRES_PASSWORD: lakekeeper
+      POSTGRES_DB: lakekeeper
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakekeeper -d lakekeeper"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    ports:
+      - "5433:5432"
+    networks:
+      - cambrian-example
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.4
+    environment:
+      RUSTFS_ACCESS_KEY: cambrian-access-key
+      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null -w '%{http_code}' http://localhost:9000/ | grep -E '^(200|403)$'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    ports:
+      - "9001:9000"
+    networks:
+      - cambrian-example
+
+  rustfs-init:
+    image: amazon/aws-cli:2.17.16
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: cambrian-access-key
+      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_DEFAULT_REGION: local
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "[rustfs-init] creating bucket s3://cambrian-example-warehouse ..."
+        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket cambrian-example-warehouse 2>&1) && rc=0 || rc=$$?
+        echo "$$out"
+        if [ "$$rc" -eq 0 ]; then
+          echo "[rustfs-init] bucket created"
+          exit 0
+        fi
+        if echo "$$out" | grep -qE 'BucketAlreadyOwnedByYou|BucketAlreadyExists'; then
+          echo "[rustfs-init] bucket already exists - OK"
+          exit 0
+        fi
+        echo "[rustfs-init] FAILED to create bucket (rc=$$rc)"
+        exit "$$rc"
+    networks:
+      - cambrian-example
+
+  lakekeeper-migrate:
+    image: &lakekeeper-image quay.io/lakekeeper/catalog:v0.12.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    environment: &lakekeeper-env
+      LAKEKEEPER__PG_ENCRYPTION_KEY: "cambrian-example-not-secure"
+      LAKEKEEPER__PG_DATABASE_URL_READ: "postgresql://lakekeeper:lakekeeper@postgres:5432/lakekeeper"
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: "postgresql://lakekeeper:lakekeeper@postgres:5432/lakekeeper"
+      LAKEKEEPER__AUTHZ_BACKEND: "allowall"
+      RUST_LOG: "info"
+    command: ["migrate"]
+    networks:
+      - cambrian-example
+
+  lakekeeper:
+    image: *lakekeeper-image
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+      rustfs:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+    environment: *lakekeeper-env
+    command: ["serve"]
+    # Lakekeeper validates the warehouse storage endpoint by *connecting*
+    # to it at warehouse-creation time, AND vends the same endpoint to
+    # clients. Therefore the endpoint string must resolve from BOTH inside
+    # the docker network (lakekeeper -> rustfs) AND from the host
+    # (your shell -> rustfs published port). ``host.docker.internal`` +
+    # ``host-gateway`` does this on Docker Desktop (macOS/Windows auto;
+    # Linux needs the ``host-gateway`` extra_host below plus, in some
+    # CI environments, a ``127.0.0.1 host.docker.internal`` line in
+    # /etc/hosts).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 2s
+      timeout: 10s
+      retries: 15
+      start_period: 5s
+    ports:
+      - "9181:8181"
+    networks:
+      - cambrian-example
+
+  bootstrap:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      LAKEKEEPER_URL: http://lakekeeper:8181
+      WAREHOUSE_NAME: cambrian-example
+      # In-network endpoint - used only for the rustfs-init bucket-create
+      # step (which runs inside the docker network).
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      # Endpoint vended to clients in the warehouse storage profile. Must
+      # resolve from BOTH lakekeeper (in the docker network) AND your
+      # shell (via the published 9001 port). The host-side port (9001) is
+      # what shows up here because the in-network ``host.docker.internal``
+      # mapping uses the host's port mapping.
+      CLIENT_RUSTFS_ENDPOINT: http://host.docker.internal:9001
+      RUSTFS_BUCKET: cambrian-example-warehouse
+      RUSTFS_ACCESS_KEY: cambrian-access-key
+      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_REGION: local
+    volumes:
+      - ./bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    networks:
+      - cambrian-example
+
+networks:
+  cambrian-example:
+    name: cambrian-example
