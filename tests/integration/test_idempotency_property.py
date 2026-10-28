@@ -73,16 +73,8 @@ def test_retry_after_partial_apply_converges(
     assert catalog_fingerprint(rest_catalog, ns) == script.expected
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Lakekeeper v0.12.2 acknowledges a remove-properties commit but ignores it "
-        "when the removal would leave the table with no properties at all (removing "
-        "one of several keys works); reproduces with bare PyIceberg. Re-enable "
-        "Features.unset_props in the property once this passes."
-    ),
-)
 def test_unset_tblproperties_removes_key(rest_catalog: RestCatalog, ns: str) -> None:
+    # Lakekeeper < 0.14 kept the key when removing the last remaining property.
     apply_script(
         rest_catalog,
         f"CREATE TABLE {ns}.t (id INT) USING iceberg;\n"

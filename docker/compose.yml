@@ -12,7 +12,7 @@
 #   postgres:17               - latest stable
 #   rustfs/rustfs:1.0.0-beta.4 - newest pre-1.0 (rustfs has no GA yet; betas
 #                               are what's shipped on Docker Hub)
-#   quay.io/lakekeeper/catalog:v0.12.2 - latest stable GitHub release
+#   quay.io/lakekeeper/catalog:v0.14.2 - latest stable GitHub release
 
 name: cambrian-test
 
@@ -88,7 +88,7 @@ services:
       - cambrian
 
   lakekeeper-migrate:
-    image: &lakekeeper-image quay.io/lakekeeper/catalog:v0.12.2
+    image: &lakekeeper-image quay.io/lakekeeper/catalog:v0.14.2
     depends_on:
       postgres:
         condition: service_healthy

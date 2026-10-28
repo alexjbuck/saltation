@@ -91,7 +91,7 @@ services:
       - cambrian-example
 
   lakekeeper-migrate:
-    image: &lakekeeper-image quay.io/lakekeeper/catalog:v0.12.2
+    image: &lakekeeper-image quay.io/lakekeeper/catalog:v0.14.2
     depends_on:
       postgres:
         condition: service_healthy

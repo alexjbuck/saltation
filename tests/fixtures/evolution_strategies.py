@@ -206,7 +206,7 @@ class Features:
     partition: bool = True
     sort: bool = True
     props: bool = True
-    unset_props: bool = False
+    unset_props: bool = True
     identifier: bool = True
     max_tables: int = 2
     # Format v3: create/upgrade v3 tables, column DEFAULTs, date -> timestamp.
