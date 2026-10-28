@@ -1,4 +1,4 @@
-# Releasing cambrian
+# Releasing saltation
 
 Versions and release notes come from **change files** managed by
 [knope](https://knope.tech). Releases are cut by merging a release PR; the tag,
@@ -41,7 +41,7 @@ The `changeset` check fails a PR without a change file. Label the PR
    - tags `v<version>` and creates the GitHub release with the dists attached
      (`knope release`);
    - publishes to **TestPyPI**, then installs that upload and runs
-     `cambrian --version` against it;
+     `saltation --version` against it;
    - waits for approval on the **`pypi`** environment, then publishes to PyPI.
 
 To republish an existing tag (for example after fixing a PyPI-side problem),
@@ -61,7 +61,7 @@ trusted publisher for the project:
 | Field             | Value                                 |
 |-------------------|---------------------------------------|
 | Owner             | `alexjbuck`                           |
-| Repository        | `cambrian`                            |
+| Repository        | `saltation`                           |
 | Workflow name     | `release.yml`                         |
 | Environment name  | `pypi` (PyPI) / `testpypi` (TestPyPI) |
 

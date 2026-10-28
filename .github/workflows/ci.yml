@@ -62,7 +62,7 @@ jobs:
       matrix:
         catalog: [lakekeeper, polaris, gravitino]
     env:
-      CAMBRIAN_TEST_CATALOG: ${{ matrix.catalog }}
+      SALTATION_TEST_CATALOG: ${{ matrix.catalog }}
     steps:
       - uses: actions/checkout@v5
 
@@ -97,7 +97,7 @@ jobs:
           HYPOTHESIS_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
         run: uv run pytest tests/integration -v
 
-      - name: V1 smoke - cambrian apply --json
+      - name: V1 smoke - saltation apply --json
         # Re-bring up the stack (pytest's session fixture tore it down on
         # exit) and exercise the production code path end-to-end: the same
         # command and JSON-parse pipeline a CI deploy would run.
@@ -106,8 +106,8 @@ jobs:
         run: |
           compose=$(uv run python -m tests.integration.rig compose)
           health=$(uv run python -m tests.integration.rig health)
-          smoke_toml="$RUNNER_TEMP/cambrian.toml"
-          { uv run python -m tests.integration.rig toml; cat tests/fixtures/v1-smoke/cambrian.toml; } > "$smoke_toml"
+          smoke_toml="$RUNNER_TEMP/saltation.toml"
+          { uv run python -m tests.integration.rig toml; cat tests/fixtures/v1-smoke/saltation.toml; } > "$smoke_toml"
           docker compose -f "$compose" up -d
           for _ in $(seq 1 90); do
             if curl -fsS "$health" >/dev/null 2>&1 \
@@ -118,11 +118,11 @@ jobs:
             fi
             sleep 2
           done
-          uv run cambrian init --path "$smoke_toml"
-          uv run cambrian apply --json --path "$smoke_toml" | tee /tmp/apply.json
+          uv run saltation init --path "$smoke_toml"
+          uv run saltation apply --json --path "$smoke_toml" | tee /tmp/apply.json
           status=$(jq -r .status /tmp/apply.json)
           test "$status" = "applied" || test "$status" = "unchanged"
-          uv run cambrian apply --json --path "$smoke_toml" | tee /tmp/apply2.json
+          uv run saltation apply --json --path "$smoke_toml" | tee /tmp/apply2.json
           test "$(jq -r .status /tmp/apply2.json)" = "unchanged"
 
       - name: Dump compose logs on failure

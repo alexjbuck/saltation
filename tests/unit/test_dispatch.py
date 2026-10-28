@@ -1,4 +1,4 @@
-"""Tests for ``cambrian.sql.dispatch`` — AST → PyIceberg API call translation.
+"""Tests for ``saltation.sql.dispatch`` — AST → PyIceberg API call translation.
 
 We mock the catalog and the table; each test parses one SQL statement,
 runs :func:`dispatch`, and asserts the expected method calls on the mocks.
@@ -45,14 +45,14 @@ from pyiceberg.types import (
     TimestamptzType,
 )
 
-from cambrian.errors import DispatchError, UnsupportedStatementError
-from cambrian.iceberg.affected import TableIdent
-from cambrian.sql.dialect import CambrianSpark
-from cambrian.sql.dispatch import dispatch
+from saltation.errors import DispatchError, UnsupportedStatementError
+from saltation.iceberg.affected import TableIdent
+from saltation.sql.dialect import SaltationSpark
+from saltation.sql.dispatch import dispatch
 
 
 def _parse(sql: str):
-    tree = sqlglot.parse(sql, dialect=CambrianSpark)
+    tree = sqlglot.parse(sql, dialect=SaltationSpark)
     return [s for s in tree if s is not None]
 
 
@@ -193,7 +193,7 @@ def test_create_table_already_exists_is_idempotent() -> None:
 
 def test_create_table_unsupported_type() -> None:
     catalog = _make_catalog()
-    # STRUCT/ARRAY/MAP are now in scope; INTERVAL is a primitive cambrian
+    # STRUCT/ARRAY/MAP are now in scope; INTERVAL is a primitive saltation
     # doesn't map, so it stays unsupported.
     with pytest.raises(UnsupportedStatementError):
         dispatch(

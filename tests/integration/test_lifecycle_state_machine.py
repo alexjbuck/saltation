@@ -33,17 +33,17 @@ from hypothesis.stateful import (
 )
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.config import CambrianConfig, EvolutionsConfig
-from cambrian.errors import IllegalStateError
-from cambrian.migrate.commit import cambrian_commit, cambrian_uncommit, discover_committed_files
-from cambrian.migrate.runner import apply_idempotent, apply_reset, rollback_to_last_checkpoint
-from cambrian.sidecar.events import events, table_states_for_event
-from cambrian.sidecar.schema import (
-    CAMBRIAN_SIDECAR_VERSION,
+from saltation.config import EvolutionsConfig, SaltationConfig
+from saltation.errors import IllegalStateError
+from saltation.migrate.commit import discover_committed_files, saltation_commit, saltation_uncommit
+from saltation.migrate.runner import apply_idempotent, apply_reset, rollback_to_last_checkpoint
+from saltation.sidecar.events import events, table_states_for_event
+from saltation.sidecar.schema import (
+    SALTATION_SIDECAR_VERSION,
     SELF_MIGRATIONS,
     TABLE_STATES_TABLE,
 )
-from cambrian.sidecar.selfmigrate import _read_version, ensure_current
+from saltation.sidecar.selfmigrate import _read_version, ensure_current
 from tests.fixtures.evolution_strategies import (
     EvolutionScript,
     Features,
@@ -81,9 +81,9 @@ class Lifecycle(RuleBasedStateMachine):
         super().__init__()
         self.catalog: RestCatalog = rig_catalog("lifecycle")
         self.ns = f"life_{uuid.uuid4().hex[:12]}"
-        self.sidecar = f"_cambrian_{self.ns}"
-        self.dir = Path(tempfile.mkdtemp(prefix="cambrian-life-"))
-        self.config = CambrianConfig(
+        self.sidecar = f"_saltation_{self.ns}"
+        self.dir = Path(tempfile.mkdtemp(prefix="saltation-life-"))
+        self.config = SaltationConfig(
             catalog=catalog_config(),
             evolutions=EvolutionsConfig(dir=str(self.dir), sidecar_namespace=self.sidecar),
         )
@@ -104,7 +104,7 @@ class Lifecycle(RuleBasedStateMachine):
         self.committed_base = base
         self.live = base.expected
         if legacy:
-            # A sidecar an older cambrian created: v1 tables, version 1.
+            # A sidecar an older saltation created: v1 tables, version 1.
             SELF_MIGRATIONS[0](self.catalog, self.sidecar)
         (self.dir / "current.sql").write_text("", encoding="utf-8")
 
@@ -162,9 +162,9 @@ class Lifecycle(RuleBasedStateMachine):
     def commit(self) -> None:
         if not self.applied:
             with pytest.raises(IllegalStateError):
-                cambrian_commit(self.config, message="refused")
+                saltation_commit(self.config, message="refused")
             return
-        cambrian_commit(self.config, message=f"step {len(self.committed) + 1}")
+        saltation_commit(self.config, message=f"step {len(self.committed) + 1}")
         assert self.current is not None
         self.committed.append(self.current)
         self.current = None
@@ -174,7 +174,7 @@ class Lifecycle(RuleBasedStateMachine):
     @precondition(lambda self: self.committed and self.current is None)
     @rule()
     def uncommit(self) -> None:
-        cambrian_uncommit(self.config)
+        saltation_uncommit(self.config)
         self.current = self.committed.pop()
         self.extending = False
         self.applied = False
@@ -202,7 +202,7 @@ class Lifecycle(RuleBasedStateMachine):
     @invariant()
     def sidecar_is_current(self) -> None:
         if self.catalog.table_exists((self.sidecar, "events")) and self.seen:
-            assert _read_version(self.catalog, self.sidecar) == CAMBRIAN_SIDECAR_VERSION
+            assert _read_version(self.catalog, self.sidecar) == SALTATION_SIDECAR_VERSION
 
     def teardown(self) -> None:
         for ns in (self.ns, self.sidecar):
@@ -221,7 +221,7 @@ def test_lifecycle(rest_catalog: RestCatalog) -> None:
 
 
 def test_v1_sidecar_rows_survive_the_v2_migration(rest_catalog: RestCatalog) -> None:
-    sidecar = f"_cambrian_mig_{uuid.uuid4().hex[:8]}"
+    sidecar = f"_saltation_mig_{uuid.uuid4().hex[:8]}"
     try:
         SELF_MIGRATIONS[0](rest_catalog, sidecar)
         table = rest_catalog.load_table((sidecar, TABLE_STATES_TABLE))
@@ -240,7 +240,7 @@ def test_v1_sidecar_rows_survive_the_v2_migration(rest_catalog: RestCatalog) -> 
 
         ensure_current(rest_catalog, sidecar, allow_read_only=False)
 
-        assert _read_version(rest_catalog, sidecar) == CAMBRIAN_SIDECAR_VERSION
+        assert _read_version(rest_catalog, sidecar) == SALTATION_SIDECAR_VERSION
         (row,) = table_states_for_event(rest_catalog, sidecar, event_id="e1")
         assert (row.table_ident, row.pre_schema_id) == ("ns.t", 3)
         assert (row.object_kind, row.pre_properties, row.pre_view_version_id) == (

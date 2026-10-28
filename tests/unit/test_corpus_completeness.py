@@ -27,8 +27,8 @@ from collections.abc import Callable
 import pytest
 from sqlglot import expressions as exp
 
-from cambrian.sql import dispatch as dispatch_mod
-from cambrian.sql.ast import (
+from saltation.sql import dispatch as dispatch_mod
+from saltation.sql.ast import (
     AddPartitionField,
     AlterColumnPosition,
     DropIdentifierFields,
@@ -39,7 +39,7 @@ from cambrian.sql.ast import (
     WriteDistribution,
     WriteOrderedBy,
 )
-from cambrian.sql.dispatch import _SQLGLOT_TYPE_TO_ICEBERG
+from saltation.sql.dispatch import _SQLGLOT_TYPE_TO_ICEBERG
 from tests.fixtures.iceberg_corpus import positives
 
 

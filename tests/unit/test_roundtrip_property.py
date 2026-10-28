@@ -1,6 +1,6 @@
 """Property: rendering a parsed statement gives SQL that parses back to it.
 
-The SQL cambrian records (events, ``apply --json``) is the rendered AST, so a
+The SQL saltation records (events, ``apply --json``) is the rendered AST, so a
 lossy generator would misreport what ran: ``ALTER COLUMN c TYPE x COMMENT 'd'``
 used to render without its TYPE. Rendering must also be a fixed point, and
 how statements are laid out in a script (whitespace, comments) must not change
@@ -13,8 +13,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from cambrian.sql.dialect import CambrianSpark
-from cambrian.sql.script import parse_script
+from saltation.sql.dialect import SaltationSpark
+from saltation.sql.script import parse_script
 from tests.fixtures.evolution_strategies import EvolutionScript, Features, evolution_scripts
 from tests.fixtures.iceberg_corpus import CORPUS
 
@@ -29,10 +29,10 @@ EVERYTHING = Features(
 
 def _assert_round_trips(sql: str) -> None:
     for statement in parse_script(sql):
-        rendered = statement.sql(dialect=CambrianSpark)
+        rendered = statement.sql(dialect=SaltationSpark)
         (again,) = parse_script(rendered)
         assert again == statement, f"{sql!r} rendered as {rendered!r}"
-        assert again.sql(dialect=CambrianSpark) == rendered
+        assert again.sql(dialect=SaltationSpark) == rendered
 
 
 @pytest.mark.parametrize("entry", [e for e in CORPUS if e.expected == "apply"], ids=lambda e: e.id)

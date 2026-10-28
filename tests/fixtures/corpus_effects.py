@@ -3,7 +3,7 @@
 Each :class:`Effect` says what to build first (``base`` + ``setup``) and the
 exact :func:`tests.fixtures.catalog_state.diff` each target must show after the
 corpus SQL runs. Expectations follow Spark-Iceberg semantics (docs, plus the
-Iceberg Spark extension source where the docs are silent), not cambrian's
+Iceberg Spark extension source where the docs are silent), not saltation's
 current behaviour. ``foo`` is the namespace placeholder; ``s3://bucket/`` is
 rewritten to a location inside the test warehouse.
 
@@ -79,7 +79,7 @@ class Effect:
     setup: tuple[str, ...] = ()
     # Data ops append on every run; everything else must be a no-op the second time.
     reapply: bool = True
-    # Test catalogs (by rig name) that refuse this, with why; cambrian's request
+    # Test catalogs (by rig name) that refuse this, with why; saltation's request
     # is still correct. Run as strict xfails, so a catalog that starts
     # accepting it is noticed.
     catalog_refuses: dict[str, str] = field(default_factory=dict)

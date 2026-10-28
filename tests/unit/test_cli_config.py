@@ -1,4 +1,4 @@
-"""CLI tests for the ``cambrian config`` sub-app."""
+"""CLI tests for the ``saltation config`` sub-app."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from cambrian.cli import app
+from saltation.cli import app
 
 
 def _write(tmp_path: Path, body: str) -> Path:
-    path = tmp_path / "cambrian.toml"
+    path = tmp_path / "saltation.toml"
     path.write_text(body)
     return path
 

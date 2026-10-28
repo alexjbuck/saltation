@@ -1,7 +1,7 @@
 """Fixtures for the integration test suite.
 
 These tests run against the docker-compose stack of the catalog selected by
-``CAMBRIAN_TEST_CATALOG`` (see ``rig.py``; Lakekeeper by default). The stack is
+``SALTATION_TEST_CATALOG`` (see ``rig.py``; Lakekeeper by default). The stack is
 brought up once per test session and torn down at the end.
 
 If ``docker`` is not on ``PATH`` the whole integration suite is skipped, so

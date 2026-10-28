@@ -1,8 +1,8 @@
-"""Integration tests for ``cambrian init`` and ``cambrian status``.
+"""Integration tests for ``saltation init`` and ``saltation status``.
 
 These exercise the full path through config + catalog + sidecar bootstrap +
 read against the docker-compose stack (Lakekeeper + rustfs + Postgres).
-Each test gets a fresh ``_cambrian_test_<uuid>`` sidecar namespace so they
+Each test gets a fresh ``_saltation_test_<uuid>`` sidecar namespace so they
 don't collide if run in parallel.
 """
 
@@ -18,8 +18,8 @@ import pytest
 from pyiceberg.catalog.rest import RestCatalog
 from typer.testing import CliRunner
 
-from cambrian.cli import EXIT_NOT_INITIALIZED, EXIT_VERSION_AHEAD, app
-from cambrian.sidecar.schema import CAMBRIAN_SIDECAR_VERSION, VERSION_TABLE
+from saltation.cli import EXIT_NOT_INITIALIZED, EXIT_VERSION_AHEAD, app
+from saltation.sidecar.schema import SALTATION_SIDECAR_VERSION, VERSION_TABLE
 from tests.integration.conftest import (
     _drop_namespace_recursively,
 )
@@ -30,7 +30,7 @@ from .rig import catalog_toml
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
     """A unique sidecar namespace that is guaranteed-clean before and after the test."""
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:12]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:12]}"
     _drop_namespace_recursively(rest_catalog, namespace)
     try:
         yield namespace
@@ -40,13 +40,13 @@ def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
 
 @pytest.fixture
 def config_path(tmp_path: Path, sidecar_ns: str) -> Path:
-    """Write a cambrian.toml pointed at the test rig + per-test sidecar namespace."""
+    """Write a saltation.toml pointed at the test rig + per-test sidecar namespace."""
     body = f"""
 {catalog_toml()}
 [evolutions]
 sidecar_namespace = "{sidecar_ns}"
 """
-    path = tmp_path / "cambrian.toml"
+    path = tmp_path / "saltation.toml"
     path.write_text(body)
     return path
 
@@ -67,7 +67,7 @@ def test_init_fresh_then_status(config_path: Path, sidecar_ns: str) -> None:
     payload = json.loads(status_result.output)
     assert payload["initialized"] is True
     assert payload["sidecar_namespace"] == sidecar_ns
-    assert payload["sidecar_version"] == CAMBRIAN_SIDECAR_VERSION
+    assert payload["sidecar_version"] == SALTATION_SIDECAR_VERSION
     assert payload["is_version_ahead"] is False
     assert payload["committed_count"] == 0
     assert payload["committed_evolutions"] == []
@@ -89,7 +89,7 @@ def test_status_uninitialized_exits_with_hint(config_path: Path) -> None:
     result = _invoke(["status", "--path", str(config_path)])
     assert result.exit_code == EXIT_NOT_INITIALIZED, result.output
     assert "not initialized" in result.output.lower()
-    assert "cambrian init" in result.output
+    assert "saltation init" in result.output
 
 
 def test_status_uninitialized_json_payload(config_path: Path) -> None:
@@ -97,7 +97,7 @@ def test_status_uninitialized_json_payload(config_path: Path) -> None:
     assert result.exit_code == EXIT_NOT_INITIALIZED, result.output
     payload = json.loads(result.output)
     assert payload["initialized"] is False
-    assert payload["hint"] == "run `cambrian init`"
+    assert payload["hint"] == "run `saltation init`"
 
 
 def test_status_version_ahead_warns_but_succeeds(

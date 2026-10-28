@@ -19,15 +19,15 @@ import pytest
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, EvolutionsConfig
-from cambrian.errors import IllegalStateError
-from cambrian.migrate import apply_idempotent
-from cambrian.migrate.commit import (
-    cambrian_commit,
-    cambrian_reset_to,
-    cambrian_uncommit,
+from saltation.config import EvolutionsConfig, SaltationConfig
+from saltation.errors import IllegalStateError
+from saltation.migrate import apply_idempotent
+from saltation.migrate.commit import (
+    saltation_commit,
+    saltation_reset_to,
+    saltation_uncommit,
 )
-from cambrian.sidecar.events import (
+from saltation.sidecar.events import (
     applied_committed_ids,
     committed_evolutions,
     latest_event,
@@ -37,8 +37,8 @@ from .rig import catalog_config
 from .rig import rest_catalog as rig_catalog
 
 
-def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> CambrianConfig:
-    return CambrianConfig(
+def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> SaltationConfig:
+    return SaltationConfig(
         catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
@@ -58,7 +58,7 @@ def _verify_catalog() -> RestCatalog:
 
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     try:
         for ident in rest_catalog.list_tables(namespace):
@@ -82,7 +82,7 @@ def test_commit_uncommit_full_lifecycle(
 
     apply_idempotent(cfg)
 
-    commit_result = cambrian_commit(cfg, message="create users table")
+    commit_result = saltation_commit(cfg, message="create users table")
     assert commit_result.evolution_id == "0001_create-users-table"
     assert commit_result.event_id is not None
     assert commit_result.committed_path.exists()
@@ -106,11 +106,11 @@ def test_commit_uncommit_full_lifecycle(
     assert {f.name for f in table.schema().fields} == {"id", "extra"}
 
     # Now commit the second evolution.
-    commit_result_2 = cambrian_commit(cfg, message="add extra column")
+    commit_result_2 = saltation_commit(cfg, message="add extra column")
     assert commit_result_2.evolution_id == "0002_add-extra-column"
 
     # Uncommit the second.
-    uncommit_result = cambrian_uncommit(cfg)
+    uncommit_result = saltation_uncommit(cfg)
     assert uncommit_result.evolution_id == "0002_add-extra-column"
     assert uncommit_result.restored_path.read_text(encoding="utf-8") == sql2
     # The 0002 file is gone.
@@ -166,7 +166,7 @@ def test_apply_refuses_post_hoc_edit(
     _write(current, sql)
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
     apply_idempotent(cfg)
-    commit_result = cambrian_commit(cfg, message="seed")
+    commit_result = saltation_commit(cfg, message="seed")
 
     # Tamper with the committed file.
     commit_result.committed_path.write_text(
@@ -201,7 +201,7 @@ def test_uncommit_refused_with_downstream(
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
 
     with pytest.raises(IllegalStateError, match=r"gap"):
-        cambrian_uncommit(cfg)
+        saltation_uncommit(cfg)
 
 
 def test_uncommit_refuses_nonempty_current_without_force(
@@ -214,15 +214,15 @@ def test_uncommit_refuses_nonempty_current_without_force(
     _write(current, f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT) USING iceberg;\n")
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
     apply_idempotent(cfg)
-    cambrian_commit(cfg, message="seed")
+    saltation_commit(cfg, message="seed")
 
     # Write something into current.sql, then try to uncommit.
     _write(current, "-- new work in progress\n")
     with pytest.raises(IllegalStateError, match=r"non-empty"):
-        cambrian_uncommit(cfg)
+        saltation_uncommit(cfg)
 
     # With force=True it overrides.
-    result = cambrian_uncommit(cfg, force=True)
+    result = saltation_uncommit(cfg, force=True)
     assert result.evolution_id == "0001_seed"
 
 
@@ -233,10 +233,10 @@ def test_reset_to_rolls_back_and_preserves_audit(
 
     Note: the seed commit must pin a real snapshot (insert at least one row in
     the first evolution) because Iceberg's ``main`` ref cannot point to "no
-    snapshot" once any snapshot exists in table history. cambrian's M4
+    snapshot" once any snapshot exists in table history. saltation's M4
     rollback primitive refuses the asymmetric case ``target_snapshot_id=None``
     + ``current_snapshot=set`` as inherently unsafe — see
-    ``src/cambrian/iceberg/txn.py``. Real use of ``reset --to`` against an
+    ``src/saltation/iceberg/txn.py``. Real use of ``reset --to`` against an
     empty-seed evolution would hit the same limit; the documented workaround
     is to seed with data.
     """
@@ -250,13 +250,13 @@ def test_reset_to_rolls_back_and_preserves_audit(
     _write(current, sql1)
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
     apply_idempotent(cfg)
-    cambrian_commit(cfg, message="seed")
+    saltation_commit(cfg, message="seed")
 
     # Add a second evolution: ALTER + INSERT.
     sql2 = f"ALTER TABLE {ns}.t ADD COLUMN name STRING;\nINSERT INTO {ns}.t VALUES (1, 'alice');\n"
     _write(current, sql2)
     apply_idempotent(cfg)
-    cambrian_commit(cfg, message="add name and seed alice")
+    saltation_commit(cfg, message="add name and seed alice")
 
     # Verify second state.
     table = _verify_catalog().load_table((ns, "t"))
@@ -265,7 +265,7 @@ def test_reset_to_rolls_back_and_preserves_audit(
     assert any(r.get("name") == "alice" for r in rows)
 
     # Reset --to 0001_seed: rolls table back to seed snapshot (just `id`, one row).
-    result = cambrian_reset_to(cfg, evolution_id="0001_seed")
+    result = saltation_reset_to(cfg, evolution_id="0001_seed")
     assert result.evolution_id == "0001_seed"
     assert result.event_id is not None
 
@@ -299,7 +299,7 @@ def test_commit_refuses_dirty_state(
     _write(current, f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT) USING iceberg;\n-- edit\n")
 
     with pytest.raises(IllegalStateError, match=r"not been applied"):
-        cambrian_commit(cfg, message="edit")
+        saltation_commit(cfg, message="edit")
 
 
 def test_commit_refuses_empty_current(
@@ -313,4 +313,4 @@ def test_commit_refuses_empty_current(
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
 
     with pytest.raises(IllegalStateError, match=r"empty"):
-        cambrian_commit(cfg, message="nothing")
+        saltation_commit(cfg, message="nothing")

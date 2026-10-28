@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.errors import DispatchError
+from saltation.errors import DispatchError
 from tests.fixtures.evolution_strategies import apply_script
 
 DIALECTS = ("trino", "spark", "starrocks")

@@ -5,7 +5,7 @@ right thing*. For each entry: build the base + setup, snapshot every target,
 apply the corpus SQL, and require the diff to equal the entry's expected
 effect exactly (so a dropped clause and an unexpected side effect both fail).
 A second apply must then change nothing, except for data ops. ``invalid``
-entries must raise a CambrianError and leave every target untouched.
+entries must raise a SaltationError and leave every target untouched.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.errors import CambrianError, UnsupportedStatementError
+from saltation.errors import SaltationError, UnsupportedStatementError
 from tests.fixtures.catalog_state import (
     diff,
     namespace_snapshot,
@@ -100,7 +100,7 @@ def test_corpus_entry_effect(rest_catalog: RestCatalog, ns: str, entry: CorpusEn
     before = _snapshots(rest_catalog, targets)
 
     if entry.expected == "invalid":
-        with pytest.raises(CambrianError) as info:
+        with pytest.raises(SaltationError) as info:
             apply_script(rest_catalog, sql, VIEW_DIALECTS)
         assert not isinstance(info.value, UnsupportedStatementError), info.value
         assert _snapshots(rest_catalog, targets) == before

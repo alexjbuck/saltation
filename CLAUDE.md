@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Project: **cambrian** — a Python 3.12+ CLI that manages SQL **evolutions**
+Project: **saltation** — a Python 3.12+ CLI that manages SQL **evolutions**
 for Apache Iceberg tables via PyIceberg's in-process API. Modeled on
 graphile-migrate. `current.sql` + watch-mode hot reload for dev;
 `committed/` evolutions applied non-interactively from CI for prod. Same
@@ -8,7 +8,7 @@ binary, both contexts.
 
 ## Vocabulary — load-bearing
 
-Inside cambrian's code, docs, and JSON the canonical noun is
+Inside saltation's code, docs, and JSON the canonical noun is
 **evolution** (matching Iceberg's "schema evolution" / "partition
 evolution"). The top-level `README.md` deliberately uses "migration"
 framing alongside "evolution" for SEO — people search "iceberg
@@ -40,7 +40,7 @@ is **never** the recommended fix — only the last resort.
 
 - **PyIceberg in-process** for all catalog/table operations. No JVM, no
   Spark, no Trino.
-- **SQL dialect**: Spark subset, parsed by sqlglot via `CambrianSpark`
+- **SQL dialect**: Spark subset, parsed by sqlglot via `SaltationSpark`
   (subclass of `sqlglot.dialects.spark.Spark`). Custom `exp.Expression`
   subclasses for Iceberg-specific extensions (`ADD PARTITION FIELD`,
   `WRITE ORDERED BY`, etc.). No regex pre-parser.
@@ -51,13 +51,13 @@ is **never** the recommended fix — only the last resort.
   `SetDefaultSortOrderUpdate`) via `Transaction._apply()`. The same commit
   restores table properties, and removes `main` when the target predates
   any snapshot. Private PyIceberg
-  API — isolated in `src/cambrian/iceberg/txn.py` behind one wrapper
+  API — isolated in `src/saltation/iceberg/txn.py` behind one wrapper
   function. File upstream for a public `Transaction.apply()`.
-- **Sidecar tables** in `_cambrian` namespace: `events`, `table_states`,
+- **Sidecar tables** in `_saltation` namespace: `events`, `table_states`,
   `version`. All append-only. Self-migrated forward by Python functions in
   the binary; never edit a self-migration after release.
-- **Snapshot pinning**: Iceberg tag refs `cambrian.cp.<evolution_id>` and
-  `cambrian.committed.<n>.<msg>` keep checkpoints alive against expiration.
+- **Snapshot pinning**: Iceberg tag refs `saltation.cp.<evolution_id>` and
+  `saltation.committed.<n>.<msg>` keep checkpoints alive against expiration.
 
 ## Stack and conventions
 
@@ -67,7 +67,7 @@ is **never** the recommended fix — only the last resort.
   and writes the lock.
 - Set `UV_PROJECT_ENVIRONMENT=.venv` for any `uv` invocation if the venv
   ends up in the wrong place (a parent workspace at `$HOME` can otherwise
-  capture it). cambrian's pyproject.toml declares itself a workspace root
+  capture it). saltation's pyproject.toml declares itself a workspace root
   via `[tool.uv.workspace] members = ["."]` to mitigate.
 - Format/lint: `ruff check` + `ruff format` (select E, F, I, B, UP, RUF).
   Type-check: `ty check`. Both gates in CI.
@@ -84,7 +84,7 @@ is **never** the recommended fix — only the last resort.
 - **Catalog: Lakekeeper** (user runs it in production). REST catalog.
   The same integration suite also runs against **Polaris** and
   **Gravitino** (each pinned to its latest stable release, one parallel
-  CI job per catalog). `CAMBRIAN_TEST_CATALOG` picks the rig; stacks
+  CI job per catalog). `SALTATION_TEST_CATALOG` picks the rig; stacks
   live in `docker/` (Lakekeeper) and `docker/<catalog>/`, and their client
   properties live in `tests/integration/rig.py`. A genuine catalog refusal
   goes in the corpus entry's `catalog_refuses`, keyed by catalog. Unity
@@ -140,7 +140,7 @@ these, leave a code comment and move on. No half-finished implementations.
   affected-table extraction (M4)
 - `sidecar/` — schema, bootstrap, events, self-migration (M3). The
   module path keeps the word "migration" because these are
-  *sidecar-schema-version* migrations of cambrian's own bookkeeping
+  *sidecar-schema-version* migrations of saltation's own bookkeeping
   tables, not user-facing evolutions.
 - `migrate/` — runner, watch, commit, sync (M5–M8). Module path is
   internal-only; renaming to `evolve/` would be a wider blast radius
@@ -156,13 +156,13 @@ Surfaced while writing the examples walkthrough; not blockers for V1
 but worth knowing about so they don't get re-discovered:
 
 - `evolutions.dir` resolves relative to cwd, not the config file's
-  directory. `cambrian apply --path examples/cambrian.toml` from the
+  directory. `saltation apply --path examples/saltation.toml` from the
   repo root looks for `./evolutions` at the repo root, not under
   `examples/`. Fix: resolve relative to the config file (with an
   opt-out for absolute paths).
 - `EvolutionNotFoundError` lands at generic exit code 1. Either add a
   dedicated exit code or include an actionable hint in the error
-  ("create current.sql first, or run `cambrian init`").
+  ("create current.sql first, or run `saltation init`").
 - `apply --json` payload's rendered SQL strings include sqlglot's
   attached header comments as `/* ... */` prefixes on statement #1.
   Either strip comments from the rendered-SQL field or attach header
@@ -172,6 +172,6 @@ but worth knowing about so they don't get re-discovered:
   "what's currently in current.sql"). Either rename or null when
   `current.sql` is empty.
 - Custom sqlglot AST nodes (`AddPartitionField`, `WriteOrderedBy`,
-  etc.) render through `CambrianSpark.Generator.TRANSFORMS`. A new custom
+  etc.) render through `SaltationSpark.Generator.TRANSFORMS`. A new custom
   node needs an entry there; `tests/unit/test_roundtrip_property.py`
   fails until it renders back to the same AST.

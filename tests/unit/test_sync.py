@@ -1,4 +1,4 @@
-"""Unit tests for ``cambrian.migrate.sync``.
+"""Unit tests for ``saltation.migrate.sync``.
 
 Pure-logic tests against a mocked catalog. The end-to-end Lakekeeper
 roundtrips live in ``tests/integration/test_sync.py``.
@@ -17,11 +17,11 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pytest
 
-from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig
-from cambrian.errors import IllegalStateError
-from cambrian.migrate.sync import (
+from saltation.config import CatalogConfig, EvolutionsConfig, SaltationConfig
+from saltation.errors import IllegalStateError
+from saltation.migrate.sync import (
     SyncResult,
-    cambrian_sync,
+    saltation_sync,
 )
 
 
@@ -103,11 +103,11 @@ def stub_catalog_and_selfmigrate(
     """
     rows: list[dict[str, Any]] = []
 
-    def _fake_load_catalog(_cfg: CambrianConfig) -> MagicMock:
+    def _fake_load_catalog(_cfg: SaltationConfig) -> MagicMock:
         return _mock_catalog(rows)
 
     class _StubState:
-        sidecar_namespace = "_cambrian"
+        sidecar_namespace = "_saltation"
         version = 1
         is_version_ahead = False
 
@@ -115,13 +115,13 @@ def stub_catalog_and_selfmigrate(
         del args, kwargs
         return _StubState()
 
-    monkeypatch.setattr("cambrian.migrate.sync.load_catalog", _fake_load_catalog)
-    monkeypatch.setattr("cambrian.migrate.sync.ensure_current", _fake_ensure_current)
+    monkeypatch.setattr("saltation.migrate.sync.load_catalog", _fake_load_catalog)
+    monkeypatch.setattr("saltation.migrate.sync.ensure_current", _fake_ensure_current)
     yield rows
 
 
-def _config(tmp_path: Path) -> CambrianConfig:
-    return CambrianConfig(
+def _config(tmp_path: Path) -> SaltationConfig:
+    return SaltationConfig(
         catalog=CatalogConfig(type="sql", uri=f"sqlite:///{tmp_path}/cat.db"),
         evolutions=EvolutionsConfig(dir=str(tmp_path / "evolutions")),
     )
@@ -136,7 +136,7 @@ def test_sync_writes_missing_files(
         _event_row(event_type="commit", evolution_id="0001_seed", evolution_sql=sql, ts=_ts(1))
     )
 
-    result = cambrian_sync(_config(tmp_path))
+    result = saltation_sync(_config(tmp_path))
 
     target = tmp_path / "evolutions" / "committed" / "0001_seed.sql"
     assert target.exists()
@@ -159,7 +159,7 @@ def test_sync_skips_hash_matched_files(
         _event_row(event_type="commit", evolution_id="0001_seed", evolution_sql=sql, ts=_ts(1))
     )
 
-    result = cambrian_sync(_config(tmp_path))
+    result = saltation_sync(_config(tmp_path))
 
     assert result.skipped == 1
     assert result.written == 0
@@ -182,7 +182,7 @@ def test_sync_refuses_conflict_without_force(
         )
     )
 
-    result = cambrian_sync(_config(tmp_path))
+    result = saltation_sync(_config(tmp_path))
 
     assert result.refused == 1
     assert target.read_text(encoding="utf-8") == local_sql  # untouched
@@ -205,7 +205,7 @@ def test_sync_force_overwrites_conflict(
         )
     )
 
-    result = cambrian_sync(_config(tmp_path), force=True)
+    result = saltation_sync(_config(tmp_path), force=True)
 
     assert result.overwritten == 1
     assert target.read_text(encoding="utf-8") == catalog_sql
@@ -221,7 +221,7 @@ def test_sync_dry_run_writes_nothing(
         _event_row(event_type="commit", evolution_id="0001_seed", evolution_sql=sql, ts=_ts(1))
     )
 
-    result = cambrian_sync(_config(tmp_path), dry_run=True)
+    result = saltation_sync(_config(tmp_path), dry_run=True)
 
     target = tmp_path / "evolutions" / "committed" / "0001_seed.sql"
     assert not target.exists()
@@ -246,7 +246,7 @@ def test_sync_diff_implies_dry_run_without_force(
         )
     )
 
-    result = cambrian_sync(_config(tmp_path), diff=True)
+    result = saltation_sync(_config(tmp_path), diff=True)
 
     assert result.dry_run is True
     assert result.refused == 1
@@ -273,7 +273,7 @@ def test_sync_diff_with_force_still_overwrites(
         )
     )
 
-    result = cambrian_sync(_config(tmp_path), diff=True, force=True)
+    result = saltation_sync(_config(tmp_path), diff=True, force=True)
 
     assert result.dry_run is False
     assert result.overwritten == 1
@@ -294,7 +294,7 @@ def test_sync_filters_out_uncommitted(
         _event_row(event_type="uncommit", evolution_id="0001_seed", evolution_sql=sql, ts=_ts(2))
     )
 
-    result = cambrian_sync(_config(tmp_path))
+    result = saltation_sync(_config(tmp_path))
 
     target = tmp_path / "evolutions" / "committed" / "0001_seed.sql"
     assert not target.exists()
@@ -319,7 +319,7 @@ def test_sync_re_committed_after_uncommit_is_synced(
         _event_row(event_type="commit", evolution_id="0001_seed", evolution_sql=sql_v2, ts=_ts(3))
     )
 
-    result = cambrian_sync(_config(tmp_path))
+    result = saltation_sync(_config(tmp_path))
 
     target = tmp_path / "evolutions" / "committed" / "0001_seed.sql"
     assert target.exists()
@@ -343,7 +343,7 @@ def test_sync_refuses_internally_inconsistent_catalog_row(
     )
 
     with pytest.raises(IllegalStateError, match=r"internally inconsistent"):
-        cambrian_sync(_config(tmp_path))
+        saltation_sync(_config(tmp_path))
 
 
 def test_sync_writes_no_events(
@@ -356,15 +356,15 @@ def test_sync_writes_no_events(
         _event_row(event_type="commit", evolution_id="0001_seed", evolution_sql=sql, ts=_ts(1))
     )
 
-    with patch("cambrian.sidecar.events.write_event") as mock_write:
-        cambrian_sync(_config(tmp_path))
+    with patch("saltation.sidecar.events.write_event") as mock_write:
+        saltation_sync(_config(tmp_path))
 
     mock_write.assert_not_called()
 
 
 def test_sync_result_summary_counts(tmp_path: Path) -> None:
     """The aggregate-property counts on SyncResult match the per-file status list."""
-    from cambrian.migrate.sync import SyncFileResult
+    from saltation.migrate.sync import SyncFileResult
 
     sr = SyncResult(
         files=[

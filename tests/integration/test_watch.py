@@ -1,4 +1,4 @@
-"""Integration tests for ``cambrian watch`` against Lakekeeper.
+"""Integration tests for ``saltation watch`` against Lakekeeper.
 
 The watch loop runs as an asyncio task in-process; we drive it by
 mutating files on disk and asserting against the catalog. ``awatch``'s
@@ -19,8 +19,8 @@ from anyio import Event
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, DevConfig, EvolutionsConfig
-from cambrian.migrate.watch import WatchEvent, watch
+from saltation.config import DevConfig, EvolutionsConfig, SaltationConfig
+from saltation.migrate.watch import WatchEvent, watch
 
 from .rig import catalog_config
 from .rig import rest_catalog as rig_catalog
@@ -28,8 +28,8 @@ from .rig import rest_catalog as rig_catalog
 
 def _build_config(
     *, evolutions_dir: Path, sidecar_namespace: str, debounce_ms: int
-) -> CambrianConfig:
-    return CambrianConfig(
+) -> SaltationConfig:
+    return SaltationConfig(
         catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
@@ -41,7 +41,7 @@ def _build_config(
 
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     try:
         for ident in rest_catalog.list_tables(namespace):
@@ -52,7 +52,7 @@ def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
 
 
 async def _drive_watch(
-    cfg: CambrianConfig,
+    cfg: SaltationConfig,
     *,
     actions: list,  # list of async callables to run between event observations
     expected_apply_events: int,

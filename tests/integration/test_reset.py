@@ -21,16 +21,16 @@ from anyio import Event
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, DevConfig, EvolutionsConfig
-from cambrian.errors import ExternalWriteDetectedError, IllegalStateError
-from cambrian.migrate.runner import (
+from saltation.config import DevConfig, EvolutionsConfig, SaltationConfig
+from saltation.errors import ExternalWriteDetectedError, IllegalStateError
+from saltation.migrate.runner import (
     CURRENT_EVOLUTION_ID,
     apply_idempotent,
     apply_reset,
     rollback_to_last_checkpoint,
 )
-from cambrian.migrate.watch import WatchEvent, watch
-from cambrian.sidecar.events import latest_event
+from saltation.migrate.watch import WatchEvent, watch
+from saltation.sidecar.events import latest_event
 
 from .rig import catalog_config
 from .rig import rest_catalog as rig_catalog
@@ -38,8 +38,8 @@ from .rig import rest_catalog as rig_catalog
 
 def _build_config(
     *, evolutions_dir: Path, sidecar_namespace: str, debounce_ms: int = 100
-) -> CambrianConfig:
-    return CambrianConfig(
+) -> SaltationConfig:
+    return SaltationConfig(
         catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
@@ -60,7 +60,7 @@ def _verify_catalog() -> RestCatalog:
 
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     try:
         for ident in rest_catalog.list_tables(namespace):
@@ -248,7 +248,7 @@ def test_rollback_command_undoes_last_apply(
 
 
 async def _drive_watch_reset(
-    cfg: CambrianConfig,
+    cfg: SaltationConfig,
     *,
     actions: list,
     expected_events: int,

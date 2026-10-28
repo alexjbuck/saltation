@@ -1,8 +1,8 @@
 """Integration tests for the M4 rollback primitive.
 
-Exercises ``cambrian.iceberg.checkpoint.capture`` + ``cambrian.iceberg.txn.restore_pointers``
+Exercises ``saltation.iceberg.checkpoint.capture`` + ``saltation.iceberg.txn.restore_pointers``
 against a live Lakekeeper REST catalog (via the docker-compose rig). Mirrors the
-scenarios validated by ``prototypes/m4_rollback.py`` but driven through the cambrian
+scenarios validated by ``prototypes/m4_rollback.py`` but driven through the saltation
 public API surface rather than the prototype's inline rollback.
 """
 
@@ -15,8 +15,8 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import IntegerType, LongType, NestedField, StringType
 
-from cambrian.errors import ExternalWriteDetectedError
-from cambrian.iceberg import Checkpoint, capture, pin, restore_pointers
+from saltation.errors import ExternalWriteDetectedError
+from saltation.iceberg import Checkpoint, capture, pin, restore_pointers
 
 
 def _initial_schema() -> Schema:
@@ -232,7 +232,7 @@ def test_pin_creates_tag(ns: str, rest_catalog: RestCatalog) -> None:
 
     cp = capture(table)
     assert cp.snapshot_id is not None
-    tag_name = "cambrian.cp.test"
+    tag_name = "saltation.cp.test"
 
     pin(table, tag_name=tag_name, snapshot_id=cp.snapshot_id)
 
@@ -250,10 +250,10 @@ def test_pin_is_noop_for_metadata_only_checkpoint(ns: str, rest_catalog: RestCat
     cp = capture(table)
     assert cp.snapshot_id is None
 
-    pin(table, tag_name="cambrian.cp.noop", snapshot_id=cp.snapshot_id)
+    pin(table, tag_name="saltation.cp.noop", snapshot_id=cp.snapshot_id)
 
     table = rest_catalog.load_table(table_id)
-    assert "cambrian.cp.noop" not in table.refs()
+    assert "saltation.cp.noop" not in table.refs()
 
 
 def test_checkpoint_carries_metadata_location(ns: str, rest_catalog: RestCatalog) -> None:

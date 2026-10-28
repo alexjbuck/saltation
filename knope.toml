@@ -59,4 +59,4 @@ type = "Release"
 
 [github]
 owner = "alexjbuck"
-repo = "cambrian"
+repo = "saltation"

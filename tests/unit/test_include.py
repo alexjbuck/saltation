@@ -1,4 +1,4 @@
-"""Tests for ``cambrian.sql.include`` — directive resolution + hashing.
+"""Tests for ``saltation.sql.include`` — directive resolution + hashing.
 
 The include resolver is pure I/O over a filesystem; tests use ``tmp_path`` to
 build small file trees and assert on the expanded text, hash stability, source
@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from cambrian.errors import CircularIncludeError, IncludeNotFoundError
-from cambrian.sql.include import expand
+from saltation.errors import CircularIncludeError, IncludeNotFoundError
+from saltation.sql.include import expand
 
 
 def _write(path: Path, content: str) -> None:
@@ -44,8 +44,8 @@ def test_expand_single_include(tmp_path: Path) -> None:
 
     result = expand(tmp_path / "current.sql")
 
-    assert "-- cambrian:include-begin child.sql" in result.text
-    assert "-- cambrian:include-end child.sql" in result.text
+    assert "-- saltation:include-begin child.sql" in result.text
+    assert "-- saltation:include-end child.sql" in result.text
     assert "CREATE TABLE c (id INT);" in result.text
     # Source list is the root + the child, in visit order.
     assert result.sources == [

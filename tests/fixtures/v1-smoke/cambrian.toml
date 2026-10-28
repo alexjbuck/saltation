@@ -1,6 +1,0 @@
-# The [catalog] table comes from the rig under test; CI prepends
-# `python -m tests.integration.rig toml`.
-
-[evolutions]
-dir               = "tests/fixtures/v1-smoke"
-sidecar_namespace = "_cambrian_v1_smoke"

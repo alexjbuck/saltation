@@ -5,7 +5,7 @@
 -- [wob_bare] expected=apply :: iceberg.apache.org/docs/latest/spark-ddl; canonical WRITE ORDERED BY (no parens, comma list).
 ALTER TABLE foo.t WRITE ORDERED BY category, id;
 
--- [wob_paren] expected=apply :: Parenthesised form (cambrian's existing tests use this).
+-- [wob_paren] expected=apply :: Parenthesised form (saltation's existing tests use this).
 ALTER TABLE foo.t WRITE ORDERED BY (category, id);
 
 -- [wob_asc_desc] expected=apply :: iceberg.apache.org/docs/latest/spark-ddl; explicit directions.

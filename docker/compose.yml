@@ -1,4 +1,4 @@
-# Integration-test rig for cambrian.
+# Integration-test rig for saltation.
 #
 # Services:
 #   postgres        - backing store for Lakekeeper's metadata
@@ -13,7 +13,7 @@
 #   rustfs/rustfs:1.0.4       - latest stable
 #   quay.io/lakekeeper/catalog:v0.14.2 - latest stable GitHub release
 
-name: cambrian-test
+name: saltation-test
 
 services:
   postgres:
@@ -32,13 +32,13 @@ services:
     ports:
       - "5432:5432"
     networks:
-      - cambrian
+      - saltation
 
   rustfs:
     image: rustfs/rustfs:1.0.4
     environment:
-      RUSTFS_ACCESS_KEY: cambrian-access-key
-      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_ACCESS_KEY: saltation-access-key
+      RUSTFS_SECRET_KEY: saltation-secret-key
       RUSTFS_ADDRESS: ":9000"
       RUSTFS_CONSOLE_ENABLE: "false"
     healthcheck:
@@ -52,7 +52,7 @@ services:
     ports:
       - "9000:9000"
     networks:
-      - cambrian
+      - saltation
 
   rustfs-init:
     image: amazon/aws-cli:2.17.16
@@ -61,8 +61,8 @@ services:
         condition: service_healthy
     restart: "no"
     environment:
-      AWS_ACCESS_KEY_ID: cambrian-access-key
-      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_ACCESS_KEY_ID: saltation-access-key
+      AWS_SECRET_ACCESS_KEY: saltation-secret-key
       AWS_DEFAULT_REGION: local
       AWS_EC2_METADATA_DISABLED: "true"
     # Idempotent: tolerate BucketAlreadyOwnedByYou and BucketAlreadyExists.
@@ -70,8 +70,8 @@ services:
     command:
       - |
         set -eu
-        echo "[rustfs-init] creating bucket s3://cambrian-warehouse on rustfs ..."
-        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket cambrian-warehouse 2>&1) && rc=0 || rc=$$?
+        echo "[rustfs-init] creating bucket s3://saltation-warehouse on rustfs ..."
+        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket saltation-warehouse 2>&1) && rc=0 || rc=$$?
         echo "$$out"
         if [ "$$rc" -eq 0 ]; then
           echo "[rustfs-init] bucket created"
@@ -84,7 +84,7 @@ services:
         echo "[rustfs-init] FAILED to create bucket (rc=$$rc)"
         exit "$$rc"
     networks:
-      - cambrian
+      - saltation
 
   lakekeeper-migrate:
     image: &lakekeeper-image quay.io/lakekeeper/catalog:v0.14.2
@@ -93,14 +93,14 @@ services:
         condition: service_healthy
     restart: "no"
     environment: &lakekeeper-env
-      LAKEKEEPER__PG_ENCRYPTION_KEY: "cambrian-test-only-not-secure"
+      LAKEKEEPER__PG_ENCRYPTION_KEY: "saltation-test-only-not-secure"
       LAKEKEEPER__PG_DATABASE_URL_READ: "postgresql://lakekeeper:lakekeeper@postgres:5432/lakekeeper"
       LAKEKEEPER__PG_DATABASE_URL_WRITE: "postgresql://lakekeeper:lakekeeper@postgres:5432/lakekeeper"
       LAKEKEEPER__AUTHZ_BACKEND: "allowall"
       RUST_LOG: "info"
     command: ["migrate"]
     networks:
-      - cambrian
+      - saltation
 
   lakekeeper:
     image: *lakekeeper-image
@@ -133,7 +133,7 @@ services:
     ports:
       - "8181:8181"
     networks:
-      - cambrian
+      - saltation
 
   bootstrap:
     image: curlimages/curl:8.10.1
@@ -143,7 +143,7 @@ services:
     restart: "no"
     environment:
       LAKEKEEPER_URL: http://lakekeeper:8181
-      WAREHOUSE_NAME: cambrian
+      WAREHOUSE_NAME: saltation
       # In-network endpoint - used only for the rustfs-init bucket-create
       # step (which runs inside the docker network).
       RUSTFS_ENDPOINT: http://rustfs:9000
@@ -153,16 +153,16 @@ services:
       # the published 9000 port). See the lakekeeper service for the
       # extra_hosts trick that makes this work on Linux.
       CLIENT_RUSTFS_ENDPOINT: http://host.docker.internal:9000
-      RUSTFS_BUCKET: cambrian-warehouse
-      RUSTFS_ACCESS_KEY: cambrian-access-key
-      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_BUCKET: saltation-warehouse
+      RUSTFS_ACCESS_KEY: saltation-access-key
+      RUSTFS_SECRET_KEY: saltation-secret-key
       RUSTFS_REGION: local
     volumes:
       - ./bootstrap.sh:/bootstrap.sh:ro
     entrypoint: ["/bin/sh", "/bootstrap.sh"]
     networks:
-      - cambrian
+      - saltation
 
 networks:
-  cambrian:
-    name: cambrian-test
+  saltation:
+    name: saltation-test

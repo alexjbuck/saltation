@@ -25,7 +25,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import IntegerType, LongType, NestedField, StringType
 
-from cambrian.iceberg import capture, restore_pointers
+from saltation.iceberg import capture, restore_pointers
 
 _ID_SEQUENCE: Iterator[int] = itertools.count(start=1)
 

@@ -1,4 +1,4 @@
-# Integration-test rig for cambrian against Apache Gravitino's standalone
+# Integration-test rig for saltation against Apache Gravitino's standalone
 # Iceberg REST catalog server.
 #
 # Services:
@@ -16,14 +16,14 @@
 #
 # No warehouse property on the client: Gravitino reads it as a catalog name.
 
-name: cambrian-test-gravitino
+name: saltation-test-gravitino
 
 services:
   rustfs:
     image: rustfs/rustfs:1.0.4
     environment:
-      RUSTFS_ACCESS_KEY: cambrian-access-key
-      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_ACCESS_KEY: saltation-access-key
+      RUSTFS_SECRET_KEY: saltation-secret-key
       RUSTFS_ADDRESS: ":9000"
       RUSTFS_CONSOLE_ENABLE: "false"
     healthcheck:
@@ -35,7 +35,7 @@ services:
     ports:
       - "9000:9000"
     networks:
-      - cambrian
+      - saltation
 
   rustfs-init:
     image: amazon/aws-cli:2.17.16
@@ -44,21 +44,21 @@ services:
         condition: service_healthy
     restart: "no"
     environment:
-      AWS_ACCESS_KEY_ID: cambrian-access-key
-      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_ACCESS_KEY_ID: saltation-access-key
+      AWS_SECRET_ACCESS_KEY: saltation-secret-key
       AWS_DEFAULT_REGION: local
       AWS_EC2_METADATA_DISABLED: "true"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket cambrian-warehouse 2>&1) && rc=0 || rc=$$?
+        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket saltation-warehouse 2>&1) && rc=0 || rc=$$?
         echo "$$out"
         if [ "$$rc" -eq 0 ]; then exit 0; fi
         if echo "$$out" | grep -qE 'BucketAlreadyOwnedByYou|BucketAlreadyExists'; then exit 0; fi
         exit "$$rc"
     networks:
-      - cambrian
+      - saltation
 
   gravitino:
     image: apache/gravitino-iceberg-rest:1.3.1
@@ -76,11 +76,11 @@ services:
       # implicit ``jdbc:sqlite::memory:`` URI: each pooled connection would get
       # its own empty database. The file lives in the container's writable
       # layer: survives ``restart``, discarded by ``down``.
-      GRAVITINO_ICEBERG_REST_URI: "jdbc:sqlite:/tmp/cambrian-iceberg.db"
+      GRAVITINO_ICEBERG_REST_URI: "jdbc:sqlite:/tmp/saltation-iceberg.db"
       GRAVITINO_ICEBERG_REST_JDBC_DRIVER: org.sqlite.JDBC
       GRAVITINO_ICEBERG_REST_JDBC_USER: iceberg
       GRAVITINO_ICEBERG_REST_JDBC_PASSWORD: iceberg
-      GRAVITINO_ICEBERG_REST_WAREHOUSE: "s3://cambrian-warehouse/warehouse"
+      GRAVITINO_ICEBERG_REST_WAREHOUSE: "s3://saltation-warehouse/warehouse"
       GRAVITINO_ICEBERG_REST_IO_IMPL: org.apache.iceberg.aws.s3.S3FileIO
       # Server-side S3FileIO config AND the values vended to clients in
       # loadTable/createTable ``config``. PyIceberg lets table config override
@@ -91,8 +91,8 @@ services:
       GRAVITINO_ICEBERG_REST_S3_ENDPOINT: "http://host.docker.internal:9000"
       GRAVITINO_ICEBERG_REST_S3_REGION: local
       GRAVITINO_ICEBERG_REST_S3_PATH_STYLE_ACCESS: "true"
-      GRAVITINO_ICEBERG_REST_S3_ACCESS_KEY: cambrian-access-key
-      GRAVITINO_ICEBERG_REST_S3_SECRET_KEY: cambrian-secret-key
+      GRAVITINO_ICEBERG_REST_S3_ACCESS_KEY: saltation-access-key
+      GRAVITINO_ICEBERG_REST_S3_SECRET_KEY: saltation-secret-key
       # PyIceberg >=0.7 always sends ``X-Iceberg-Access-Delegation:
       # vended-credentials``; without a provider for the s3 scheme Gravitino
       # rejects table loads/creates ("No credential provider found ...").
@@ -118,7 +118,7 @@ services:
     ports:
       - "8181:9001"
     networks:
-      - cambrian
+      - saltation
 
   bootstrap:
     image: curlimages/curl:8.10.1
@@ -135,8 +135,8 @@ services:
         echo "$$body" | grep -q 'views' || { echo "[bootstrap] view endpoints missing"; exit 1; }
         echo "[bootstrap] gravitino ready"
     networks:
-      - cambrian
+      - saltation
 
 networks:
-  cambrian:
-    name: cambrian-test-gravitino
+  saltation:
+    name: saltation-test-gravitino

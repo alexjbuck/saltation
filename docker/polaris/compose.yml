@@ -1,4 +1,4 @@
-# Integration-test rig for cambrian against Apache Polaris.
+# Integration-test rig for saltation against Apache Polaris.
 #
 # Services:
 #   rustfs          - S3-compatible object storage (warehouse data lives here)
@@ -19,14 +19,14 @@
 # split removes the need for the host.docker.internal trick used by the
 # Lakekeeper rig.
 
-name: cambrian-test-polaris
+name: saltation-test-polaris
 
 services:
   rustfs:
     image: rustfs/rustfs:1.0.4
     environment:
-      RUSTFS_ACCESS_KEY: cambrian-access-key
-      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_ACCESS_KEY: saltation-access-key
+      RUSTFS_SECRET_KEY: saltation-secret-key
       RUSTFS_ADDRESS: ":9000"
       RUSTFS_CONSOLE_ENABLE: "false"
     healthcheck:
@@ -38,7 +38,7 @@ services:
     ports:
       - "9000:9000"
     networks:
-      - cambrian
+      - saltation
 
   rustfs-init:
     image: amazon/aws-cli:2.17.16
@@ -47,16 +47,16 @@ services:
         condition: service_healthy
     restart: "no"
     environment:
-      AWS_ACCESS_KEY_ID: cambrian-access-key
-      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_ACCESS_KEY_ID: saltation-access-key
+      AWS_SECRET_ACCESS_KEY: saltation-secret-key
       AWS_DEFAULT_REGION: local
       AWS_EC2_METADATA_DISABLED: "true"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        echo "[rustfs-init] creating bucket s3://cambrian-warehouse on rustfs ..."
-        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket cambrian-warehouse 2>&1) && rc=0 || rc=$$?
+        echo "[rustfs-init] creating bucket s3://saltation-warehouse on rustfs ..."
+        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket saltation-warehouse 2>&1) && rc=0 || rc=$$?
         echo "$$out"
         if [ "$$rc" -eq 0 ]; then
           echo "[rustfs-init] bucket created"
@@ -69,7 +69,7 @@ services:
         echo "[rustfs-init] FAILED to create bucket (rc=$$rc)"
         exit "$$rc"
     networks:
-      - cambrian
+      - saltation
 
   polaris:
     image: apache/polaris:1.8.0
@@ -84,14 +84,14 @@ services:
       POLARIS_PERSISTENCE_TYPE: in-memory
       # realm,client_id,client_secret for the root principal. Fixed values
       # make the token request deterministic across runs.
-      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,cambrian-polaris-secret
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,saltation-polaris-secret
       polaris.realm-context.realms: POLARIS
       quarkus.otel.sdk.disabled: "true"
       # The catalog is created with stsUnavailable=true, so Polaris's own
       # FileIO (metadata.json writes) falls back to the AWS SDK default
       # credential chain - i.e. these env vars.
-      AWS_ACCESS_KEY_ID: cambrian-access-key
-      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_ACCESS_KEY_ID: saltation-access-key
+      AWS_SECRET_ACCESS_KEY: saltation-secret-key
       AWS_REGION: local
       # PyIceberg's purge_table / DROP TABLE ... PURGE is rejected with 403
       # unless this is on.
@@ -110,7 +110,7 @@ services:
       - "8181:8181"
       - "8182:8182"
     networks:
-      - cambrian
+      - saltation
 
   bootstrap:
     image: curlimages/curl:8.10.1
@@ -122,9 +122,9 @@ services:
       POLARIS_URL: http://polaris:8181
       POLARIS_REALM: POLARIS
       POLARIS_CLIENT_ID: root
-      POLARIS_CLIENT_SECRET: cambrian-polaris-secret
-      CATALOG_NAME: cambrian
-      RUSTFS_BUCKET: cambrian-warehouse
+      POLARIS_CLIENT_SECRET: saltation-polaris-secret
+      CATALOG_NAME: saltation
+      RUSTFS_BUCKET: saltation-warehouse
       KEY_PREFIX: polaris
       # Endpoint Polaris uses itself (in-network).
       INTERNAL_S3_ENDPOINT: http://rustfs:9000
@@ -136,8 +136,8 @@ services:
       - ./bootstrap.sh:/bootstrap.sh:ro
     entrypoint: ["/bin/sh", "/bootstrap.sh"]
     networks:
-      - cambrian
+      - saltation
 
 networks:
-  cambrian:
-    name: cambrian-test-polaris
+  saltation:
+    name: saltation-test-polaris

@@ -1,8 +1,8 @@
-"""Tests for ``CambrianSpark`` — sqlglot dialect with Iceberg DDL extensions.
+"""Tests for ``SaltationSpark`` — sqlglot dialect with Iceberg DDL extensions.
 
 These tests cover both:
 
-* Iceberg-specific constructs (custom AST nodes in :mod:`cambrian.sql.ast`).
+* Iceberg-specific constructs (custom AST nodes in :mod:`saltation.sql.ast`).
 * Regression: stock Spark DDL that we rely on still parses cleanly.
 
 Snapshot-style equality is asserted on the rendered AST type + key args, not
@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlglot
 from sqlglot import expressions as exp
 
-from cambrian.sql.ast import (
+from saltation.sql.ast import (
     AddPartitionField,
     AlterColumnPosition,
     AlterNamespaceProperties,
@@ -27,11 +27,11 @@ from cambrian.sql.ast import (
     WriteDistribution,
     WriteOrderedBy,
 )
-from cambrian.sql.dialect import CambrianSpark
+from saltation.sql.dialect import SaltationSpark
 
 
 def _alter_actions(sql: str) -> list[exp.Expr]:
-    tree = sqlglot.parse(sql, dialect=CambrianSpark)
+    tree = sqlglot.parse(sql, dialect=SaltationSpark)
     assert len(tree) == 1, f"expected exactly one statement, got {len(tree)}"
     stmt = tree[0]
     assert isinstance(stmt, exp.Alter), f"expected Alter, got {type(stmt).__name__}"
@@ -41,7 +41,7 @@ def _alter_actions(sql: str) -> list[exp.Expr]:
 
 
 def _single(sql: str) -> exp.Expression:
-    tree = sqlglot.parse(sql, dialect=CambrianSpark)
+    tree = sqlglot.parse(sql, dialect=SaltationSpark)
     assert len(tree) == 1
     return tree[0]
 
@@ -450,15 +450,15 @@ def test_multiple_statements_parse_in_order() -> None:
     CREATE TABLE foo.t (id INT) USING iceberg;
     INSERT INTO foo.t VALUES (1);
     """
-    tree = sqlglot.parse(sql, dialect=CambrianSpark)
+    tree = sqlglot.parse(sql, dialect=SaltationSpark)
     types = [type(t).__name__ for t in tree if t is not None]
     assert types == ["Create", "Create", "Insert"]
 
 
 def test_dialect_can_be_passed_as_instance() -> None:
     sql = "ALTER TABLE t ADD PARTITION FIELD x"
-    via_class = sqlglot.parse(sql, dialect=CambrianSpark)
-    via_instance = sqlglot.parse(sql, dialect=CambrianSpark())
+    via_class = sqlglot.parse(sql, dialect=SaltationSpark)
+    via_instance = sqlglot.parse(sql, dialect=SaltationSpark())
     via_class_action = via_class[0].args["actions"][0]
     via_instance_action = via_instance[0].args["actions"][0]
     assert type(via_class_action) is type(via_instance_action) is AddPartitionField

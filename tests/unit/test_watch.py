@@ -1,4 +1,4 @@
-"""Unit tests for ``cambrian.migrate.watch``.
+"""Unit tests for ``saltation.migrate.watch``.
 
 These don't touch the filesystem (beyond ``tmp_path``) or the catalog —
 the runner is monkeypatched, and the watcher generator is a fake async
@@ -14,14 +14,14 @@ from pathlib import Path
 import pytest
 from watchfiles import Change
 
-import cambrian.migrate.watch as watch_mod
-from cambrian.config import CambrianConfig, CatalogConfig, DevConfig, EvolutionsConfig
-from cambrian.errors import CambrianError
-from cambrian.migrate.runner import ApplyResult
+import saltation.migrate.watch as watch_mod
+from saltation.config import CatalogConfig, DevConfig, EvolutionsConfig, SaltationConfig
+from saltation.errors import SaltationError
+from saltation.migrate.runner import ApplyResult
 
 
-def _make_config(tmp_path: Path, *, debounce_ms: int = 50) -> CambrianConfig:
-    return CambrianConfig(
+def _make_config(tmp_path: Path, *, debounce_ms: int = 50) -> SaltationConfig:
+    return SaltationConfig(
         catalog=CatalogConfig(type="sql", uri="sqlite:///:memory:"),
         evolutions=EvolutionsConfig(dir=str(tmp_path / "evolutions")),
         dev=DevConfig(debounce_ms=debounce_ms),
@@ -49,11 +49,11 @@ class _FakeWatcher:
             yield batch
 
 
-def _stub_apply_factory(call_log: list[CambrianConfig]) -> object:
+def _stub_apply_factory(call_log: list[SaltationConfig]) -> object:
     """Build a stub ``apply_idempotent`` that records calls and returns success."""
 
     def _stub(
-        config: CambrianConfig, *, allow_partial: bool = False, actor: str | None = None
+        config: SaltationConfig, *, allow_partial: bool = False, actor: str | None = None
     ) -> ApplyResult:
         del allow_partial, actor
         call_log.append(config)
@@ -71,7 +71,7 @@ def _stub_apply_factory(call_log: list[CambrianConfig]) -> object:
 def test_watch_calls_apply_once_per_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Two debounced batches → exactly two applies (plus an initial)."""
     cfg = _make_config(tmp_path)
-    calls: list[CambrianConfig] = []
+    calls: list[SaltationConfig] = []
     monkeypatch.setattr(watch_mod, "apply_idempotent", _stub_apply_factory(calls))
 
     fake = _FakeWatcher(
@@ -119,17 +119,17 @@ def test_watch_debounce_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def test_watch_parse_error_keeps_loop_alive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A CambrianError during apply is reported and the next batch still applies."""
+    """A SaltationError during apply is reported and the next batch still applies."""
     cfg = _make_config(tmp_path)
     call_count = {"n": 0}
 
     def _flaky_apply(
-        config: CambrianConfig, *, allow_partial: bool = False, actor: str | None = None
+        config: SaltationConfig, *, allow_partial: bool = False, actor: str | None = None
     ) -> ApplyResult:
         del config, allow_partial, actor
         call_count["n"] += 1
         if call_count["n"] == 2:
-            raise CambrianError("synthetic parse failure")
+            raise SaltationError("synthetic parse failure")
         return ApplyResult(
             status="applied",
             evolution_hash="cafe" + "0" * 60,
@@ -162,7 +162,7 @@ def test_watch_initial_apply_can_be_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = _make_config(tmp_path)
-    calls: list[CambrianConfig] = []
+    calls: list[SaltationConfig] = []
     monkeypatch.setattr(watch_mod, "apply_idempotent", _stub_apply_factory(calls))
 
     fake = _FakeWatcher([])
@@ -178,22 +178,22 @@ def test_watch_use_reset_routes_to_apply_reset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``use_reset=True`` routes through ``apply_reset``, not ``apply_idempotent``."""
-    from cambrian.migrate import runner
-    from cambrian.migrate.runner import ResetResult
+    from saltation.migrate import runner
+    from saltation.migrate.runner import ResetResult
 
     cfg = _make_config(tmp_path)
     # Track which entry point fires.
     routed_to: list[str] = []
 
     def _idem(
-        config: CambrianConfig, *, allow_partial: bool = False, actor: str | None = None
+        config: SaltationConfig, *, allow_partial: bool = False, actor: str | None = None
     ) -> ApplyResult:
         del config, allow_partial, actor
         routed_to.append("idempotent")
         return ApplyResult(status="applied", evolution_hash="i" * 64)
 
     def _reset(
-        config: CambrianConfig,
+        config: SaltationConfig,
         *,
         allow_partial: bool = False,
         force: bool = False,

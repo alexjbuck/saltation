@@ -4,7 +4,7 @@ Each :class:`CorpusEntry` is one statement (or, rarely, a short multi-statement
 script) with a stable ``id``, a ``category``, the ``sql`` text, an ``expected``
 verdict (``"apply"`` for in-scope positives that must eventually parse AND
 dispatch cleanly, ``"reject"`` for out-of-scope statements that must surface as
-:class:`cambrian.errors.UnsupportedStatementError`), and a short ``note`` —
+:class:`saltation.errors.UnsupportedStatementError`), and a short ``note`` —
 usually citing the authoritative source.
 
 Sources (verified 2026-05-26):
@@ -35,7 +35,7 @@ class CorpusEntry:
     """One corpus statement and its expected end-to-end verdict.
 
     ``expected`` is the *contract*, not the current behaviour: ``"apply"``
-    entries are in cambrian's v1 scope and should parse and dispatch without
+    entries are in saltation's v1 scope and should parse and dispatch without
     error once the implementation is complete; ``"reject"`` entries are valid
     Iceberg/Spark SQL (or plausible syntax) deliberately out of scope, which
     must raise :class:`UnsupportedStatementError` rather than crash. The
@@ -625,7 +625,7 @@ CORPUS: list[CorpusEntry] = [
         "sort_order",
         "ALTER TABLE foo.t WRITE ORDERED BY (category, id)",
         "apply",
-        "Parenthesised form (cambrian's existing tests use this).",
+        "Parenthesised form (saltation's existing tests use this).",
     ),
     CorpusEntry(
         "wob_asc_desc",
@@ -946,7 +946,7 @@ CORPUS: list[CorpusEntry] = [
         "create_table_v3",
         "CREATE TABLE foo.t (v VARIANT) USING iceberg TBLPROPERTIES ('format-version' = '3')",
         "reject",
-        "Spec v3 variant; PyIceberg has no variant type yet, so cambrian refuses it.",
+        "Spec v3 variant; PyIceberg has no variant type yet, so saltation refuses it.",
     ),
     CorpusEntry(
         "upgrade_format_v3",
@@ -1269,7 +1269,7 @@ CORPUS: list[CorpusEntry] = [
         "neg_time_travel",
         "SELECT * FROM foo.t FOR VERSION AS OF 123",
         "reject",
-        f"{_QUERIES}; time-travel read; cambrian applies DDL, not SELECT.",
+        f"{_QUERIES}; time-travel read; saltation applies DDL, not SELECT.",
     ),
     CorpusEntry(
         "neg_time_travel_timestamp",

@@ -1,0 +1,594 @@
+"""``commit`` / ``uncommit`` / ``reset --to`` lifecycle commands (M7).
+
+The lifecycle:
+
+* ``commit -m <msg>`` freezes ``current.sql`` as ``committed/<NNNN>_<slug>.sql``,
+  pins per-table checkpoints under ``saltation.committed.<n>.<slug>``, emits a
+  ``commit`` event, and truncates ``current.sql``.
+* ``uncommit`` pops the latest committed file back to ``current.sql``, rolls
+  the affected tables back to the pinned checkpoint, emits an ``uncommit``
+  event. Refuses if there are downstream committed files (gap) or if
+  ``current.sql`` is non-empty (``--force`` overrides).
+* ``reset --to <evolution_id>`` rolls the affected tables of *evolution_id*
+  back to that commit's pinned checkpoint. Escape hatch only — does NOT
+  delete the committed file, does NOT touch downstream commit events.
+
+The committed-file replay (so ``saltation apply`` honours committed/ for a
+fresh deploy or a ``saltation sync``) lives in :mod:`saltation.migrate.runner`
+to avoid a circular import on the apply path.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import unicodedata
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from saltation.catalog import load_catalog
+from saltation.errors import (
+    EvolutionNotFoundError,
+    IllegalStateError,
+    SaltationError,
+)
+from saltation.iceberg.affected import (
+    TableIdent,
+    affected_tables_with_overrides,
+)
+from saltation.iceberg.checkpoint import capture, pin
+from saltation.iceberg.txn import restore_pointers
+from saltation.sidecar.events import (
+    TableStateRow,
+    latest_event,
+    table_states_for_event,
+    write_event,
+)
+from saltation.sidecar.selfmigrate import ensure_current
+from saltation.sql.include import expand
+from saltation.sql.script import parse_script
+
+if TYPE_CHECKING:
+    from pyiceberg.catalog import Catalog
+
+    from saltation.config import SaltationConfig
+
+__all__ = [
+    "COMMITTED_TAG_PREFIX",
+    "CommitResult",
+    "CommittedFile",
+    "ResetToResult",
+    "UncommitResult",
+    "compute_evolution_hash",
+    "discover_committed_files",
+    "next_sequence_number",
+    "parse_committed_filename",
+    "saltation_commit",
+    "saltation_reset_to",
+    "saltation_uncommit",
+    "slugify",
+]
+
+
+COMMITTED_TAG_PREFIX = "saltation.committed."
+SLUG_MAX_LENGTH = 50
+_COMMITTED_FILENAME_RE = re.compile(r"^(\d{4})_([a-z0-9-]+)\.sql$")
+_SLUG_REPLACE_RE = re.compile(r"[^a-z0-9]+")
+_SLUG_TRIM_RE = re.compile(r"^-+|-+$")
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedFile:
+    """One file under ``committed/`` decoded into its parts."""
+
+    number: int
+    slug: str
+    path: Path
+
+    @property
+    def evolution_id(self) -> str:
+        return f"{self.number:04d}_{self.slug}"
+
+    def tag_ref(self) -> str:
+        return f"{COMMITTED_TAG_PREFIX}{self.number}.{self.slug}"
+
+
+@dataclass
+class CommitResult:
+    """Outcome of a ``saltation commit``."""
+
+    evolution_id: str
+    committed_path: Path
+    evolution_hash: str
+    event_id: str | None
+    affected_tables: list[str] = field(default_factory=list)
+    tag_ref: str = ""
+
+
+@dataclass
+class UncommitResult:
+    """Outcome of a ``saltation uncommit``."""
+
+    evolution_id: str
+    restored_path: Path
+    event_id: str | None
+    rolled_back_tables: list[str] = field(default_factory=list)
+    skipped_tables: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ResetToResult:
+    """Outcome of ``saltation reset --to <evolution_id>``."""
+
+    evolution_id: str
+    event_id: str | None
+    rolled_back_tables: list[str] = field(default_factory=list)
+    skipped_tables: list[str] = field(default_factory=list)
+
+
+def slugify(msg: str) -> str:
+    """Lowercase ASCII-safe dash-joined slug; collapses runs, trims, length-capped.
+
+    Empty / all-non-alphanumeric input collapses to ``"evolution"`` rather
+    than to the empty string — a missing slug would yield a malformed filename.
+    """
+    normalized = unicodedata.normalize("NFKD", msg)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    lowered = ascii_only.lower()
+    dashed = _SLUG_REPLACE_RE.sub("-", lowered)
+    trimmed = _SLUG_TRIM_RE.sub("", dashed)
+    if not trimmed:
+        return "evolution"
+    if len(trimmed) > SLUG_MAX_LENGTH:
+        # Trim from the right then strip a trailing dash that the cut may have left.
+        trimmed = _SLUG_TRIM_RE.sub("", trimmed[:SLUG_MAX_LENGTH])
+        if not trimmed:
+            return "evolution"
+    return trimmed
+
+
+def parse_committed_filename(name: str) -> tuple[int, str] | None:
+    """Return ``(number, slug)`` if *name* matches ``NNNN_<slug>.sql``, else ``None``."""
+    match = _COMMITTED_FILENAME_RE.match(name)
+    if match is None:
+        return None
+    return int(match.group(1)), match.group(2)
+
+
+def discover_committed_files(committed_dir: Path) -> list[CommittedFile]:
+    """Return every well-formed file under *committed_dir*, ordered by ``number``.
+
+    Files whose names don't match the ``NNNN_<slug>.sql`` shape are ignored
+    (silently — they're probably ``.gitkeep`` or editor backups). Returns an
+    empty list if the directory doesn't exist.
+    """
+    if not committed_dir.is_dir():
+        return []
+    files: list[CommittedFile] = []
+    for entry in committed_dir.iterdir():
+        if not entry.is_file():
+            continue
+        parsed = parse_committed_filename(entry.name)
+        if parsed is None:
+            continue
+        number, slug = parsed
+        files.append(CommittedFile(number=number, slug=slug, path=entry.resolve()))
+    files.sort(key=lambda f: f.number)
+    return files
+
+
+def next_sequence_number(committed_dir: Path) -> int:
+    """Return ``max(<n>) + 1`` over existing committed files, or 1 for an empty dir.
+
+    Refuses (raises :class:`IllegalStateError`) if the numbering has gaps —
+    a gap signals manual surgery or a corrupted checkout; the safe response
+    is to surface it loudly rather than silently allocate around it.
+    """
+    files = discover_committed_files(committed_dir)
+    if not files:
+        return 1
+    numbers = [f.number for f in files]
+    expected = list(range(1, len(numbers) + 1))
+    if numbers != expected:
+        missing = sorted(set(expected) - set(numbers))
+        raise IllegalStateError(
+            f"committed/ numbering has gap(s) at {missing}; "
+            "refusing to allocate around them. Restore the missing file(s) "
+            "from git history or run `saltation sync` to rehydrate from the catalog."
+        )
+    return numbers[-1] + 1
+
+
+def compute_evolution_hash(text: str) -> str:
+    """sha256 hex of *text*, encoded as UTF-8. The cross-saltation canonical hash."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def saltation_commit(
+    config: SaltationConfig,
+    *,
+    message: str,
+    actor: str | None = None,
+) -> CommitResult:
+    """Freeze the current state into a committed evolution.
+
+    Preconditions:
+
+    * ``current.sql`` exists and is non-empty.
+    * Applying ``current.sql`` is a no-op (idempotent state is clean). The
+      caller is expected to have run ``saltation apply`` already — we don't
+      re-run it here because that would silently mutate state on commit.
+
+    Side effects (in order):
+
+    1. Compute the next sequence number and slug.
+    2. Rename ``current.sql`` → ``committed/<NNNN>_<slug>.sql``; create an
+       empty ``current.sql`` in its place.
+    3. Capture + pin a checkpoint on every affected table under tag
+       ``saltation.committed.<n>.<slug>``.
+    4. Emit a ``commit`` event referencing every checkpoint.
+
+    Raises:
+        EvolutionNotFoundError: ``current.sql`` doesn't exist.
+        IllegalStateError: ``current.sql`` is empty, or the most recent apply
+            event's hash doesn't match the file (commit on dirty state).
+    """
+
+    if not message.strip():
+        raise IllegalStateError("commit message must be non-empty")
+
+    evolutions_dir = Path(config.evolutions.dir).resolve()
+    current_path = evolutions_dir / "current.sql"
+    if not current_path.exists():
+        raise EvolutionNotFoundError(
+            f"current.sql not found at {current_path} "
+            f"(config: evolutions.dir = {config.evolutions.dir})"
+        )
+
+    expanded = expand(current_path)
+    if not expanded.text.strip():
+        raise IllegalStateError(
+            "current.sql is empty; nothing to commit. Write the evolution first, "
+            "run `saltation apply` to verify it works, then commit."
+        )
+
+    catalog = load_catalog(config)
+    state = ensure_current(
+        catalog,
+        config.evolutions.sidecar_namespace,
+        allow_read_only=False,
+    )
+    namespace = state.sidecar_namespace
+
+    from saltation.migrate.runner import _applied_and_standing
+
+    if not _applied_and_standing(catalog, namespace, expanded.hash):
+        raise IllegalStateError(
+            "current.sql has not been applied (or has been edited or rolled back since the "
+            "last apply). "
+            "Run `saltation apply` first; commit is only safe on a clean idempotent state."
+        )
+
+    committed_dir = evolutions_dir / "committed"
+    committed_dir.mkdir(parents=True, exist_ok=True)
+    number = next_sequence_number(committed_dir)
+    slug = slugify(message)
+    new_file = CommittedFile(
+        number=number, slug=slug, path=committed_dir / f"{number:04d}_{slug}.sql"
+    )
+
+    # Compute affected tables BEFORE moving the file so any parse error
+    # leaves the working tree untouched.
+    statements_raw = parse_script(expanded.text, view_source_dialect=config.views.source_dialect)
+    statements = [s for s in statements_raw if s is not None]
+    per_stmt_tables = affected_tables_with_overrides(expanded.text, statements)
+    idents = _unique_tables(per_stmt_tables)
+
+    # The commit records, for every object this dev cycle touched, how it
+    # stood before current.sql (what uncommit restores) and, for tables, the
+    # state pinned under the tag now (what reset --to restores).
+    from saltation.migrate.runner import _load_baseline
+
+    baseline = _load_baseline(catalog, namespace)
+    tag_name = new_file.tag_ref()
+    table_states: list[TableStateRow] = []
+    for (kind, ident_str), before in baseline.items():
+        table = None
+        if kind == "table" and catalog.table_exists(_ident_str_to_tuple(ident_str)):
+            table = catalog.load_table(_ident_str_to_tuple(ident_str))
+        if table is None:
+            table_states.append(before)
+            continue
+        cp = capture(table)
+        pin(table, tag_name=tag_name, snapshot_id=cp.snapshot_id)
+        table_states.append(
+            replace(
+                before,
+                post_snapshot_id=cp.snapshot_id,
+                post_schema_id=cp.schema_id,
+                post_spec_id=cp.spec_id,
+                post_sort_order_id=cp.sort_order_id,
+                tag_ref=tag_name if cp.snapshot_id is not None else None,
+            )
+        )
+
+    # 2. Move current.sql → committed/<NNNN>_<slug>.sql and truncate current.
+    new_file.path.write_text(expanded.text, encoding="utf-8")
+    current_path.write_text("", encoding="utf-8")
+
+    # 3. Emit the commit event.
+    from saltation.migrate.runner import _default_actor as _make_actor
+
+    event_id = write_event(
+        catalog,
+        namespace,
+        event_type="commit",
+        evolution_id=new_file.evolution_id,
+        evolution_hash=expanded.hash,
+        evolution_sql=expanded.text,
+        actor=actor or _make_actor(),
+        notes=f"committed {len(idents)} table(s); tag={tag_name}",
+        table_states=table_states,
+    )
+
+    return CommitResult(
+        evolution_id=new_file.evolution_id,
+        committed_path=new_file.path,
+        evolution_hash=expanded.hash,
+        event_id=event_id,
+        affected_tables=[str(i) for i in idents],
+        tag_ref=tag_name,
+    )
+
+
+def saltation_uncommit(
+    config: SaltationConfig,
+    *,
+    force: bool = False,
+    actor: str | None = None,
+) -> UncommitResult:
+    """Pop the latest committed evolution back to ``current.sql`` and rollback.
+
+    Preconditions:
+
+    * At least one committed file exists.
+    * No downstream committed files (i.e. the popped file must be the
+      latest — gaps shouldn't exist, but we defend).
+    * ``current.sql`` is empty unless *force* is true.
+
+    Side effects:
+
+    1. Read ``committed/<NNNN>_<slug>.sql`` (highest number).
+    2. Write its content to ``current.sql`` (clobbering if *force*).
+    3. Roll every affected table back to the checkpoint pinned at the
+       commit event's tag.
+    4. Delete the committed file.
+    5. Emit an ``uncommit`` event.
+
+    Raises:
+        IllegalStateError: no committed files; downstream files exist;
+            ``current.sql`` is non-empty without *force*.
+    """
+    evolutions_dir = Path(config.evolutions.dir).resolve()
+    committed_dir = evolutions_dir / "committed"
+    files = discover_committed_files(committed_dir)
+    if not files:
+        raise IllegalStateError(
+            "no committed evolutions to uncommit. The committed/ directory is empty."
+        )
+
+    latest_file = files[-1]
+    numbers = [f.number for f in files]
+    if numbers != list(range(1, len(numbers) + 1)):
+        raise IllegalStateError(
+            f"committed/ numbering has gap(s); refusing to uncommit. Found numbers {numbers}."
+        )
+
+    current_path = evolutions_dir / "current.sql"
+    current_existing = current_path.read_text(encoding="utf-8") if current_path.exists() else ""
+    if current_existing.strip() and not force:
+        raise IllegalStateError(
+            "current.sql is non-empty; uncommit would clobber unsaved work. "
+            "Re-run with --force to overwrite, or save the current SQL elsewhere first."
+        )
+
+    catalog = load_catalog(config)
+    state = ensure_current(
+        catalog,
+        config.evolutions.sidecar_namespace,
+        allow_read_only=False,
+    )
+    namespace = state.sidecar_namespace
+
+    commit_event = latest_event(
+        catalog, namespace, event_type="commit", evolution_id=latest_file.evolution_id
+    )
+    if commit_event is None:
+        raise IllegalStateError(
+            f"committed file {latest_file.path.name} has no matching commit event in the "
+            "catalog. Run `saltation sync` to reconcile, or remove the file manually if it "
+            "was added by hand."
+        )
+
+    committed_text = latest_file.path.read_text(encoding="utf-8")
+    current_path.write_text(committed_text, encoding="utf-8")
+
+    from saltation.migrate.runner import _restore_baseline
+
+    rows = table_states_for_event(catalog, namespace, event_id=commit_event.event_id)
+    rollbacks = _restore_baseline(catalog, {(r.object_kind, r.table_ident): r for r in rows})
+    rolled_back = [r.ident for r in rollbacks]
+    skipped = sorted({r.table_ident for r in rows} - set(rolled_back))
+    rollback_states = rows
+
+    latest_file.path.unlink()
+
+    from saltation.migrate.runner import _default_actor as _make_actor
+
+    event_id = write_event(
+        catalog,
+        namespace,
+        event_type="uncommit",
+        evolution_id=latest_file.evolution_id,
+        evolution_hash=commit_event.evolution_hash,
+        evolution_sql=committed_text,
+        actor=actor or _make_actor(),
+        notes=(
+            f"uncommitted {latest_file.evolution_id}; "
+            f"rolled back {len(rolled_back)} of {len(rows)} tables"
+        ),
+        table_states=rollback_states,
+    )
+
+    return UncommitResult(
+        evolution_id=latest_file.evolution_id,
+        restored_path=current_path,
+        event_id=event_id,
+        rolled_back_tables=rolled_back,
+        skipped_tables=skipped,
+    )
+
+
+def saltation_reset_to(
+    config: SaltationConfig,
+    *,
+    evolution_id: str,
+    actor: str | None = None,
+) -> ResetToResult:
+    """Roll affected tables back to the checkpoint pinned at *evolution_id*.
+
+    Escape hatch — for incident response only. Does NOT delete the
+    committed file. Does NOT touch downstream commit events. Emits a
+    ``rollback`` event so the audit trail records the operation.
+    """
+    catalog = load_catalog(config)
+    state = ensure_current(
+        catalog,
+        config.evolutions.sidecar_namespace,
+        allow_read_only=False,
+    )
+    namespace = state.sidecar_namespace
+
+    commit_event = latest_event(catalog, namespace, event_type="commit", evolution_id=evolution_id)
+    if commit_event is None:
+        raise IllegalStateError(
+            f"no commit event found for evolution_id={evolution_id!r}. "
+            "Check `saltation status` for the valid set."
+        )
+
+    rows = table_states_for_event(catalog, namespace, event_id=commit_event.event_id)
+    rolled_back: list[str] = []
+    skipped: list[str] = []
+    rollback_states: list[TableStateRow] = []
+    for row in rows:
+        # reset --to restores to the *post-state* of the named commit (the
+        # state captured + tag-pinned at commit time), not its pre-state
+        # (which is the previous evolution's resting state).
+        target = TableStateRow(
+            table_ident=row.table_ident,
+            pre_snapshot_id=row.post_snapshot_id,
+            pre_schema_id=row.post_schema_id,
+            pre_spec_id=row.post_spec_id,
+            pre_sort_order_id=row.post_sort_order_id,
+            pre_metadata_loc=row.tag_ref,
+            tag_ref=row.tag_ref,
+        )
+        outcome = _rollback_to_row(catalog, target)
+        if outcome is None:
+            skipped.append(row.table_ident)
+            rollback_states.append(TableStateRow(table_ident=row.table_ident, tag_ref=row.tag_ref))
+            continue
+        rolled_back.append(row.table_ident)
+        rollback_states.append(outcome)
+
+    from saltation.migrate.runner import _default_actor as _make_actor
+
+    event_id = write_event(
+        catalog,
+        namespace,
+        event_type="rollback",
+        evolution_id=evolution_id,
+        evolution_hash=commit_event.evolution_hash,
+        evolution_sql=commit_event.evolution_sql,
+        actor=actor or _make_actor(),
+        notes=(
+            f"reset --to {evolution_id}; rolled back {len(rolled_back)} of {len(rows)} tables. "
+            "Audit trail preserved; downstream commit events are untouched."
+        ),
+        table_states=rollback_states,
+    )
+
+    return ResetToResult(
+        evolution_id=evolution_id,
+        event_id=event_id,
+        rolled_back_tables=rolled_back,
+        skipped_tables=skipped,
+    )
+
+
+def _rollback_to_row(catalog: Catalog, row: TableStateRow) -> TableStateRow | None:
+    """Roll table at *row.table_ident* back to *row*'s pre-state. Returns the post-state row.
+
+    Returns ``None`` if the checkpoint can't be restored (no pre-state recorded,
+    or the table no longer exists). The caller decides whether that's an error.
+    """
+    if row.pre_schema_id is None or row.pre_spec_id is None or row.pre_sort_order_id is None:
+        return None
+    ident_tuple = _ident_str_to_tuple(row.table_ident)
+    try:
+        table = catalog.load_table(ident_tuple)
+    except Exception:
+        return None
+    current = table.current_snapshot()
+    from_snap = current.snapshot_id if current is not None else None
+    try:
+        restore_pointers(
+            table,
+            target_snapshot_id=row.pre_snapshot_id,
+            target_schema_id=row.pre_schema_id,
+            target_spec_id=row.pre_spec_id,
+            target_sort_order_id=row.pre_sort_order_id,
+            expected_current_snapshot_id=from_snap,
+        )
+    except SaltationError:
+        # Surface the underlying error to the caller via re-raise after
+        # writing the rollback event would be ideal, but we don't have the
+        # buffer yet. For now: propagate so the user sees the failure.
+        raise
+    rolled = catalog.load_table(ident_tuple)
+    post = rolled.current_snapshot()
+    return TableStateRow(
+        table_ident=row.table_ident,
+        pre_snapshot_id=from_snap,
+        pre_schema_id=rolled.schema().schema_id,
+        pre_spec_id=rolled.spec().spec_id,
+        pre_sort_order_id=rolled.sort_order().order_id,
+        pre_metadata_loc=rolled.metadata_location,
+        post_snapshot_id=post.snapshot_id if post is not None else row.pre_snapshot_id,
+        post_schema_id=row.pre_schema_id,
+        post_spec_id=row.pre_spec_id,
+        post_sort_order_id=row.pre_sort_order_id,
+        tag_ref=row.tag_ref,
+    )
+
+
+def _unique_tables(per_stmt: list[list[TableIdent]]) -> list[TableIdent]:
+    seen: dict[str, TableIdent] = {}
+    for tables in per_stmt:
+        for t in tables:
+            seen.setdefault(str(t), t)
+    return list(seen.values())
+
+
+def _ident_to_tuple(ident: TableIdent) -> tuple[str, ...]:
+    if ident.namespace:
+        return (*ident.namespace.split("."), ident.name)
+    return (ident.name,)
+
+
+def _ident_str_to_tuple(ident: str) -> tuple[str, ...]:
+    if "." in ident:
+        ns, name = ident.rsplit(".", 1)
+        return (*ns.split("."), name)
+    return (ident,)

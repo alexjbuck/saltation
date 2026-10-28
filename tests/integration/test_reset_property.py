@@ -20,8 +20,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.config import CambrianConfig, EvolutionsConfig
-from cambrian.migrate.runner import apply_reset
+from saltation.config import EvolutionsConfig, SaltationConfig
+from saltation.migrate.runner import apply_reset
 from tests.fixtures.evolution_strategies import (
     EvolutionScript,
     Features,
@@ -69,10 +69,10 @@ def test_reset_lands_on_base_plus_latest_edit(
 ) -> None:
     base, edits = case
     ns = f"reset_{uuid.uuid4().hex[:12]}"
-    sidecar = f"_cambrian_{ns}"
+    sidecar = f"_saltation_{ns}"
     namespaces += [ns, sidecar]
     current = tmp_path_factory.mktemp("evolutions") / "current.sql"
-    config = CambrianConfig(
+    config = SaltationConfig(
         catalog=catalog_config(),
         evolutions=EvolutionsConfig(dir=str(current.parent), sidecar_namespace=sidecar),
     )

@@ -7,7 +7,7 @@ Per the plan's §7 closer, V1 ships when this passes:
        -> reset --to <id> -> sync from a fresh checkout
 
 with a non-trivial schema (>=3 tables, >=1 partitioned, >=1 with a sort
-order) and an out-of-band ``cambrian apply --json`` smoke check that
+order) and an out-of-band ``saltation apply --json`` smoke check that
 mirrors the production code path.
 """
 
@@ -26,22 +26,22 @@ import pytest
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, EvolutionsConfig
-from cambrian.migrate import apply_idempotent
-from cambrian.migrate.commit import (
-    cambrian_commit,
-    cambrian_reset_to,
-    cambrian_uncommit,
+from saltation.config import EvolutionsConfig, SaltationConfig
+from saltation.migrate import apply_idempotent
+from saltation.migrate.commit import (
+    saltation_commit,
+    saltation_reset_to,
+    saltation_uncommit,
 )
-from cambrian.migrate.sync import cambrian_sync
-from cambrian.sidecar.events import applied_committed_ids, committed_evolutions
+from saltation.migrate.sync import saltation_sync
+from saltation.sidecar.events import applied_committed_ids, committed_evolutions
 
 from .rig import catalog_config, catalog_toml
 from .rig import rest_catalog as rig_catalog
 
 
-def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> CambrianConfig:
-    return CambrianConfig(
+def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> SaltationConfig:
+    return SaltationConfig(
         catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
@@ -61,7 +61,7 @@ def _verify_catalog() -> RestCatalog:
 
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
-    namespace = f"_cambrian_v1_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_v1_{uuid.uuid4().hex[:8]}"
     yield namespace
     try:
         for ident in rest_catalog.list_tables(namespace):
@@ -146,9 +146,9 @@ def test_v1_acceptance_full_lifecycle(
     assert "name" in {f.name for f in users_table.schema().fields}
 
     # 4. commit -m "initial schema"
-    commit1 = cambrian_commit(cfg, message="initial schema")
+    commit1 = saltation_commit(cfg, message="initial schema")
     assert commit1.evolution_id == "0001_initial-schema"
-    assert commit1.tag_ref.startswith("cambrian.committed.1.")
+    assert commit1.tag_ref.startswith("saltation.committed.1.")
     assert current.read_text(encoding="utf-8") == ""
 
     # 5. Write a new current.sql; apply; commit.
@@ -157,12 +157,12 @@ def test_v1_acceptance_full_lifecycle(
     assert apply3.status == "applied"
     metadata_table = _verify_catalog().load_table((ns, "metadata"))
     assert {f.name for f in metadata_table.schema().fields} == {"key", "value"}
-    commit2 = cambrian_commit(cfg, message="add metadata")
+    commit2 = saltation_commit(cfg, message="add metadata")
     assert commit2.evolution_id == "0002_add-metadata"
 
     # 6. uncommit. The second evolution's SQL is restored to current.sql and
     # the second evolution's table changes are rolled back.
-    uncommit = cambrian_uncommit(cfg)
+    uncommit = saltation_uncommit(cfg)
     assert uncommit.evolution_id == "0002_add-metadata"
     assert current.read_text(encoding="utf-8") == _add_metadata_table(ns)
     # The second committed file is gone; the first remains.
@@ -178,7 +178,7 @@ def test_v1_acceptance_full_lifecycle(
     # the metadata table exists, then prove reset --to rolls back what it
     # rolled back in its checkpoint.
     apply_idempotent(cfg)
-    reset_result = cambrian_reset_to(cfg, evolution_id="0001_initial-schema")
+    reset_result = saltation_reset_to(cfg, evolution_id="0001_initial-schema")
     assert reset_result.evolution_id == "0001_initial-schema"
     # 0001 didn't touch users/events/audit further than create; rollback
     # is no-op for whatever wasn't moved. The audit trail is what matters.
@@ -190,7 +190,7 @@ def test_v1_acceptance_full_lifecycle(
     fresh = tmp_path / "fresh-clone"
     fresh.mkdir()
     cfg_fresh = _build_config(evolutions_dir=fresh, sidecar_namespace=sidecar_ns)
-    sync_result = cambrian_sync(cfg_fresh)
+    sync_result = saltation_sync(cfg_fresh)
     assert sync_result.refused == 0
     assert sync_result.written == 1, sync_result.files
     assert (fresh / "committed" / "0001_initial-schema.sql").exists()
@@ -202,7 +202,7 @@ def test_v1_acceptance_full_lifecycle(
     assert fresh_text == original_text
 
     # And a follow-up sync is a clean no-op.
-    second_sync = cambrian_sync(cfg_fresh)
+    second_sync = saltation_sync(cfg_fresh)
     assert second_sync.written == 0
     assert second_sync.skipped == 1
 
@@ -214,7 +214,7 @@ def test_v1_acceptance_full_lifecycle(
 def test_v1_acceptance_apply_json_smoke(
     rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
 ) -> None:
-    """Subprocess-launched ``cambrian apply --json`` mirrors a production deploy.
+    """Subprocess-launched ``saltation apply --json`` mirrors a production deploy.
 
     Asserts:
       * exit code 0 on a fresh apply
@@ -228,7 +228,7 @@ def test_v1_acceptance_apply_json_smoke(
         evolutions / "current.sql",
         f"CREATE TABLE IF NOT EXISTS {ns}.smoke (id BIGINT) USING iceberg;\n",
     )
-    toml_path = tmp_path / "cambrian.toml"
+    toml_path = tmp_path / "saltation.toml"
     toml_path.write_text(
         f"""
 {catalog_toml()}
@@ -239,16 +239,16 @@ sidecar_namespace = "{sidecar_ns}"
         encoding="utf-8",
     )
 
-    # Use the cambrian script that uv installed alongside this interpreter.
-    # Falling back to ``python -m cambrian`` if that's not on PATH keeps the
+    # Use the saltation script that uv installed alongside this interpreter.
+    # Falling back to ``python -m saltation`` if that's not on PATH keeps the
     # test green when a contributor runs the suite without ``uv sync``.
-    cambrian_bin = shutil.which("cambrian")
-    if cambrian_bin is not None:
-        cmd_init = [cambrian_bin, "init", "--path", str(toml_path)]
-        cmd_apply = [cambrian_bin, "apply", "--json", "--path", str(toml_path)]
+    saltation_bin = shutil.which("saltation")
+    if saltation_bin is not None:
+        cmd_init = [saltation_bin, "init", "--path", str(toml_path)]
+        cmd_apply = [saltation_bin, "apply", "--json", "--path", str(toml_path)]
     else:
-        cmd_init = [sys.executable, "-m", "cambrian", "init", "--path", str(toml_path)]
-        cmd_apply = [sys.executable, "-m", "cambrian", "apply", "--json", "--path", str(toml_path)]
+        cmd_init = [sys.executable, "-m", "saltation", "init", "--path", str(toml_path)]
+        cmd_apply = [sys.executable, "-m", "saltation", "apply", "--json", "--path", str(toml_path)]
 
     env = {**os.environ}
     init = subprocess.run(cmd_init, check=False, capture_output=True, text=True, env=env)

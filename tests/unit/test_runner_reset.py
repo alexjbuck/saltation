@@ -1,4 +1,4 @@
-"""Unit tests for reset-mode helpers in ``cambrian.migrate.runner``.
+"""Unit tests for reset-mode helpers in ``saltation.migrate.runner``.
 
 Pure-logic tests only — the catalog-touching paths exercise via
 ``apply_reset`` live in ``tests/integration/test_reset.py``.
@@ -6,8 +6,8 @@ Pure-logic tests only — the catalog-touching paths exercise via
 
 from __future__ import annotations
 
-from cambrian.iceberg.checkpoint import Checkpoint
-from cambrian.migrate.runner import (
+from saltation.iceberg.checkpoint import Checkpoint
+from saltation.migrate.runner import (
     CHECKPOINT_TAG_PREFIX,
     CURRENT_EVOLUTION_ID,
     RESET_LAST_RESORT_HINT,
@@ -15,11 +15,11 @@ from cambrian.migrate.runner import (
     _ident_str_to_tuple,
     _row_to_checkpoint,
 )
-from cambrian.sidecar.events import TableStateRow
+from saltation.sidecar.events import TableStateRow
 
 
 def test_checkpoint_tag_uses_documented_prefix() -> None:
-    assert _checkpoint_tag("current") == "cambrian.cp.current"
+    assert _checkpoint_tag("current") == "saltation.cp.current"
     assert _checkpoint_tag(CURRENT_EVOLUTION_ID) == f"{CHECKPOINT_TAG_PREFIX}current"
 
 
@@ -31,7 +31,7 @@ def test_row_to_checkpoint_full_pre_state() -> None:
         pre_spec_id=1,
         pre_sort_order_id=0,
         pre_metadata_loc="s3://bucket/path",
-        tag_ref="cambrian.cp.current",
+        tag_ref="saltation.cp.current",
     )
     cp = _row_to_checkpoint(row)
     assert cp == Checkpoint(
@@ -40,7 +40,7 @@ def test_row_to_checkpoint_full_pre_state() -> None:
         spec_id=1,
         sort_order_id=0,
         metadata_loc="s3://bucket/path",
-        tag_ref="cambrian.cp.current",
+        tag_ref="saltation.cp.current",
     )
 
 

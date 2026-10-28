@@ -1,12 +1,12 @@
-"""parse_script: view bodies in a source dialect, everything else as cambrian Spark."""
+"""parse_script: view bodies in a source dialect, everything else as saltation Spark."""
 
 from __future__ import annotations
 
 import pytest
 from sqlglot import expressions as exp
 
-from cambrian.errors import DispatchError
-from cambrian.sql.script import SOURCE_DIALECT, SOURCE_SQL, VIEW_BODIES, parse_script
+from saltation.errors import DispatchError
+from saltation.sql.script import SOURCE_DIALECT, SOURCE_SQL, VIEW_BODIES, parse_script
 
 TRINO_BODY = (
     'SELECT _key AS device_id, ids[1] AS id FROM redpanda.default."devices.array.btr" '

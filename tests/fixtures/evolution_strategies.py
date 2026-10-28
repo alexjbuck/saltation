@@ -2,7 +2,7 @@
 
 The generator walks a small in-memory model of each table and only emits
 statements that are legal against the model at that point in the script, so a
-dispatch error on a *fresh* apply is a cambrian bug, not a generator artefact.
+dispatch error on a *fresh* apply is a saltation bug, not a generator artefact.
 The model's :meth:`TableModel.fingerprint` uses the same shape as
 :func:`catalog_fingerprint`, so tests can compare live catalog state against
 the model (correctness) as well as against itself after a re-apply
@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 from hypothesis import strategies as st
 
-from cambrian.sql.dispatch import dispatch
-from cambrian.sql.script import parse_script
+from saltation.sql.dispatch import dispatch
+from saltation.sql.script import parse_script
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -38,7 +38,7 @@ __all__ = [
     "evolution_scripts",
 ]
 
-PROP_PREFIX = "cambrian.p."
+PROP_PREFIX = "saltation.p."
 DISTRIBUTION_MODE = "write.distribution-mode"
 TABLE_COMMENT = "comment"
 
@@ -236,7 +236,7 @@ class EvolutionScript:
 
 
 # (Spark SQL literal body, decoded doc). Spark escapes quotes with a backslash;
-# the ANSI/Trino doubled quote ('') does not parse in CambrianSpark.
+# the ANSI/Trino doubled quote ('') does not parse in SaltationSpark.
 _DOCS = st.sampled_from(
     [
         ("first", "first"),

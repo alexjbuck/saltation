@@ -1,4 +1,4 @@
-"""Integration tests for ``cambrian apply`` in idempotent mode.
+"""Integration tests for ``saltation apply`` in idempotent mode.
 
 These exercise the full M5 stack against a live Lakekeeper rig:
 
@@ -22,10 +22,10 @@ from pathlib import Path
 import pytest
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.config import CambrianConfig, EvolutionsConfig, ViewsConfig
-from cambrian.errors import UnsupportedStatementError
-from cambrian.migrate import apply_idempotent
-from cambrian.sidecar.events import latest_event
+from saltation.config import EvolutionsConfig, SaltationConfig, ViewsConfig
+from saltation.errors import UnsupportedStatementError
+from saltation.migrate import apply_idempotent
+from saltation.sidecar.events import latest_event
 
 # Re-use the rig coordinates from conftest.py. Keeping these as constants
 # rather than importing the fixture's internals so the integration tests
@@ -38,13 +38,13 @@ def _build_config(
     *,
     evolutions_dir: Path,
     sidecar_namespace: str,
-) -> CambrianConfig:
-    """Construct a CambrianConfig pointing at the test rig.
+) -> SaltationConfig:
+    """Construct a SaltationConfig pointing at the test rig.
 
     Bypasses TOML parsing so each test can spin up a unique sidecar namespace
     without touching the filesystem outside ``tmp_path``.
     """
-    return CambrianConfig(
+    return SaltationConfig(
         catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
@@ -65,11 +65,11 @@ def _write_current(evolutions_dir: Path, sql: str) -> Path:
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
     """A unique sidecar namespace per test; cleaned up after.
 
-    cambrian's own ``_cambrian_test_<uuid>`` namespace; on teardown drop the
+    saltation's own ``_saltation_test_<uuid>`` namespace; on teardown drop the
     three sidecar tables we created. The ``ns`` fixture from conftest is
     used separately for user-facing tables.
     """
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     # Teardown: drop sidecar tables (if present) and the namespace.
     from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError

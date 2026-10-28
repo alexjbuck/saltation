@@ -1,14 +1,14 @@
-# cambrian
+# saltation
 
-540 million years ago, the Cambrian Explosion unleashed the greatest burst of evolutionary diversity in Earth’s history. Cambrian does the same for your data lake.
+In evolutionary biology, *saltation* is change by sudden leaps rather than slow drift. That's how a data lake's schema evolves: long stretches of stability, then a migration that has to land exactly right. Saltation makes those leaps safe for Apache Iceberg tables.
 
-By automating and streamlining Iceberg table evolution, Cambrian eliminates the bottlenecks of schema updates and partition changes. Don't let your data architecture fossilize—enable a new era of rapid, adaptive data explosion.
+Write the schema evolution (migration) as SQL, iterate on it locally with hot reload, then commit it and let CI apply it non-interactively, with the same tool in both places. Don't let your data architecture fossilize.
 
 ## What Is It
 
 A SQL-driven evolution runner for **Apache Iceberg** tables. Modeled on
 [graphile-migrate](https://github.com/graphile/migrate) and the broader
-Postgres-migration ecosystem (Flyway, Sqitch). Cambrian uses
+Postgres-migration ecosystem (Flyway, Sqitch). Saltation uses
 [PyIceberg](https://py.iceberg.apache.org/) in-process — no JVM, no Spark,
 no Trino.
 
@@ -35,28 +35,28 @@ the error messages, and the docs all reinforce that.
 ## Install
 
 ```bash
-uv tool install cambrian
+uv tool install saltation
 # or one-shot:
-uvx cambrian --help
+uvx saltation --help
 ```
 
 ## Quickstart (dev)
 
 ```bash
 # 1. Scaffold a project pointing at your REST / SQL / Glue catalog.
-cambrian init --path cambrian.toml
+saltation init --path saltation.toml
 
 # 2. Edit evolutions/current.sql with your DDL.
 $EDITOR evolutions/current.sql
 
 # 3. Hot-reload loop. Saves trigger an idempotent re-apply.
-cambrian watch
+saltation watch
 
 # 4. When you're happy with the diff, freeze it.
-cambrian commit -m "add users + events tables"
+saltation commit -m "add users + events tables"
 
 # 5. Ship the new committed file via git. Production picks it up.
-git add evolutions/committed/*.sql cambrian.toml && git commit
+git add evolutions/committed/*.sql saltation.toml && git commit
 ```
 
 The `committed/` directory is the contract between dev and prod. Production
@@ -65,19 +65,19 @@ it's been applied is refused.
 
 ## Production recipe (CI)
 
-`cambrian.toml` should resolve secrets from the environment via `${VAR}`
+`saltation.toml` should resolve secrets from the environment via `${VAR}`
 substitution:
 
 ```toml
 [catalog]
 type      = "rest"
-uri       = "${CAMBRIAN_CATALOG_URI}"
+uri       = "${SALTATION_CATALOG_URI}"
 warehouse = "prod"
-token     = "${CAMBRIAN_CATALOG_TOKEN}"
+token     = "${SALTATION_CATALOG_TOKEN}"
 
 [evolutions]
 dir               = "./evolutions"
-sidecar_namespace = "_cambrian"
+sidecar_namespace = "_saltation"
 ```
 
 Need a literal `${...}` in a value? Escape it with `$${...}` — make-style.
@@ -85,12 +85,12 @@ Need a literal `${...}` in a value? Escape it with `$${...}` — make-style.
 GitHub Actions deploy step:
 
 ```yaml
-- name: cambrian apply (prod)
+- name: saltation apply (prod)
   env:
-    CAMBRIAN_CATALOG_URI: ${{ secrets.CAMBRIAN_CATALOG_URI }}
-    CAMBRIAN_CATALOG_TOKEN: ${{ secrets.CAMBRIAN_CATALOG_TOKEN }}
+    SALTATION_CATALOG_URI: ${{ secrets.SALTATION_CATALOG_URI }}
+    SALTATION_CATALOG_TOKEN: ${{ secrets.SALTATION_CATALOG_TOKEN }}
   run: |
-    uvx cambrian@<version> apply --json --path cambrian.toml \
+    uvx saltation@<version> apply --json --path saltation.toml \
       | tee /tmp/apply.json
     test "$(jq -r .status /tmp/apply.json)" = "applied" \
       || test "$(jq -r .status /tmp/apply.json)" = "unchanged"
@@ -103,23 +103,23 @@ is a no-op — re-running on a flaky job is safe.
 
 | Command                      | Mode      | JSON shape                          |
 | ---------------------------- | --------- | ----------------------------------- |
-| `cambrian init`              | mutating  | n/a                                 |
-| `cambrian status`            | read-only | [status][doc-json]                  |
-| `cambrian apply`             | mutating  | [apply][doc-json]                   |
-| `cambrian apply --reset`     | mutating  | [reset][doc-json]                   |
-| `cambrian redo`              | mutating  | alias for `apply --reset`           |
-| `cambrian rollback`          | mutating  | [reset][doc-json]                   |
-| `cambrian commit -m <msg>`   | mutating  | [commit][doc-json]                  |
-| `cambrian uncommit`          | mutating  | [uncommit][doc-json]                |
-| `cambrian reset-to <id>`     | mutating  | [reset-to][doc-json]                |
-| `cambrian watch`             | mutating  | NDJSON, one apply event per line    |
-| `cambrian sync` / `download` | mutating  | [sync][doc-json]                    |
-| `cambrian config show`       | read-only | dump of config (credentials masked) |
-| `cambrian config check`      | read-only | n/a                                 |
+| `saltation init`              | mutating  | n/a                                 |
+| `saltation status`            | read-only | [status][doc-json]                  |
+| `saltation apply`             | mutating  | [apply][doc-json]                   |
+| `saltation apply --reset`     | mutating  | [reset][doc-json]                   |
+| `saltation redo`              | mutating  | alias for `apply --reset`           |
+| `saltation rollback`          | mutating  | [reset][doc-json]                   |
+| `saltation commit -m <msg>`   | mutating  | [commit][doc-json]                  |
+| `saltation uncommit`          | mutating  | [uncommit][doc-json]                |
+| `saltation reset-to <id>`     | mutating  | [reset-to][doc-json]                |
+| `saltation watch`             | mutating  | NDJSON, one apply event per line    |
+| `saltation sync` / `download` | mutating  | [sync][doc-json]                    |
+| `saltation config show`       | read-only | dump of config (credentials masked) |
+| `saltation config check`      | read-only | n/a                                 |
 
 [doc-json]: ./docs/cli-json.md
 
-- `init`: idempotent bootstrap of the `_cambrian` sidecar
+- `init`: idempotent bootstrap of the `_saltation` sidecar
   namespace + tables in the configured catalog.
 - `status`: print the sidecar version, applied committed evolutions, and
   the most recent `current.sql` apply event.
@@ -136,7 +136,7 @@ is a no-op — re-running on a flaky job is safe.
   before editing `current.sql` from scratch.
 - `commit -m`: freeze the current applied state as
   `committed/<NNNN>_<slug>.sql`; pin per-table checkpoints under
-  `cambrian.committed.<n>.<slug>`; truncate `current.sql`.
+  `saltation.committed.<n>.<slug>`; truncate `current.sql`.
 - `uncommit`: pop the latest committed file back to `current.sql` and
   roll the affected tables to the pinned checkpoint. Refuses on a gap or
   a non-empty `current.sql` (`--force` overrides).
@@ -152,7 +152,7 @@ is a no-op — re-running on a flaky job is safe.
 
 ## Supported SQL
 
-Evolution files hold Iceberg DDL parsed by cambrian's sqlglot Spark dialect
+Evolution files hold Iceberg DDL parsed by saltation's sqlglot Spark dialect
 and applied in-process via PyIceberg. The full surface below is pinned by a
 corpus of statements in `tests/fixtures/iceberg_corpus.py` and exercised
 end-to-end against a live catalog.
@@ -203,7 +203,7 @@ idempotent-evolution model.
 | ---- | --------------------------------------------- |
 | 0    | success                                       |
 | 1    | generic error (parse, dispatch, IO, …)        |
-| 2    | sidecar not initialised — run `cambrian init` |
+| 2    | sidecar not initialised — run `saltation init` |
 | 3    | sidecar version is newer than this binary     |
 | 4    | external write detected (rollback / sync)     |
 
@@ -212,7 +212,7 @@ hint on stderr.
 
 ## Configuration
 
-`cambrian.toml`:
+`saltation.toml`:
 
 ```toml
 [catalog]
@@ -224,7 +224,7 @@ warehouse = "my-warehouse"
 
 [evolutions]
 dir               = "./evolutions"
-sidecar_namespace = "_cambrian"
+sidecar_namespace = "_saltation"
 
 [dev]
 mode        = "idempotent"   # "idempotent" (default) | "reset"
@@ -233,7 +233,7 @@ debounce_ms = 500
 ```
 
 The sidecar tables (`events`, `table_states`, `version`) are append-only
-and self-migrated forward by cambrian itself. Their names are fixed; only
+and self-migrated forward by saltation itself. Their names are fixed; only
 the namespace is user-configurable.
 
 ## Release infrastructure

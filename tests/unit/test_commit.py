@@ -16,8 +16,8 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
-from cambrian.errors import IllegalStateError
-from cambrian.migrate.commit import (
+from saltation.errors import IllegalStateError
+from saltation.migrate.commit import (
     COMMITTED_TAG_PREFIX,
     SLUG_MAX_LENGTH,
     CommittedFile,
@@ -27,7 +27,7 @@ from cambrian.migrate.commit import (
     parse_committed_filename,
     slugify,
 )
-from cambrian.sidecar.events import applied_committed_ids
+from saltation.sidecar.events import applied_committed_ids
 
 # ---------------------------------------------------------------------------
 # slugify
@@ -162,8 +162,8 @@ def test_next_sequence_number_refuses_start_above_1(tmp_path: Path) -> None:
 def test_committed_file_tag_ref_matches_documented_shape() -> None:
     cf = CommittedFile(number=7, slug="add-users", path=Path("/tmp/0007_add-users.sql"))
     assert cf.evolution_id == "0007_add-users"
-    # CLAUDE.md specifies cambrian.committed.<n>.<msg> — n unpadded, msg = slug.
-    assert cf.tag_ref() == "cambrian.committed.7.add-users"
+    # CLAUDE.md specifies saltation.committed.<n>.<msg> — n unpadded, msg = slug.
+    assert cf.tag_ref() == "saltation.committed.7.add-users"
     assert cf.tag_ref().startswith(COMMITTED_TAG_PREFIX)
 
 

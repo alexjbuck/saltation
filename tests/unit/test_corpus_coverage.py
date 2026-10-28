@@ -1,7 +1,7 @@
 """Parse-level oracle over the Iceberg SQL corpus.
 
 * ``expected`` in ``{"apply", "invalid"}``: the SQL parses with
-  :class:`CambrianSpark` to a real node, not a sqlglot ``Command`` fallback.
+  :class:`SaltationSpark` to a real node, not a sqlglot ``Command`` fallback.
   Whether it then does the right thing is proven against Lakekeeper by
   ``tests/integration/test_corpus_effects.py``; a mock catalog accepts any
   call, so "dispatch didn't raise" here would prove nothing.
@@ -22,9 +22,9 @@ from pyiceberg.types import IntegerType, NestedField, StringType
 from sqlglot import expressions as exp
 from sqlglot.errors import ParseError
 
-from cambrian.errors import UnsupportedStatementError
-from cambrian.sql.dialect import CambrianSpark
-from cambrian.sql.dispatch import dispatch
+from saltation.errors import UnsupportedStatementError
+from saltation.sql.dialect import SaltationSpark
+from saltation.sql.dispatch import dispatch
 from tests.fixtures.iceberg_corpus import CORPUS
 
 
@@ -63,7 +63,7 @@ def _make_table() -> MagicMock:
 
 
 def _parse_one(sql: str) -> exp.Expression:
-    tree = sqlglot.parse(sql, dialect=CambrianSpark)
+    tree = sqlglot.parse(sql, dialect=SaltationSpark)
     stmts = [s for s in tree if s is not None]
     assert len(stmts) == 1, f"expected one statement, got {len(stmts)}"
     return stmts[0]

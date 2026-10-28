@@ -1,7 +1,7 @@
 """Property: applying an evolution is idempotent and lands on the modelled state.
 
 The runner short-circuits an unchanged ``current.sql`` by hash, so a literal
-second ``cambrian apply`` proves nothing. What really re-runs is the
+second ``saltation apply`` proves nothing. What really re-runs is the
 parse→dispatch loop: every edit of ``current.sql`` re-applies the whole file
 over whatever the previous version left behind, and a retry after a partial
 failure re-applies over a prefix. These tests drive that loop directly.
@@ -78,7 +78,7 @@ def test_unset_tblproperties_removes_key(rest_catalog: RestCatalog, ns: str) -> 
     apply_script(
         rest_catalog,
         f"CREATE TABLE {ns}.t (id INT) USING iceberg;\n"
-        f"ALTER TABLE {ns}.t SET TBLPROPERTIES ('cambrian.p.k'='v');\n"
-        f"ALTER TABLE {ns}.t UNSET TBLPROPERTIES ('cambrian.p.k');\n",
+        f"ALTER TABLE {ns}.t SET TBLPROPERTIES ('saltation.p.k'='v');\n"
+        f"ALTER TABLE {ns}.t UNSET TBLPROPERTIES ('saltation.p.k');\n",
     )
-    assert "cambrian.p.k" not in rest_catalog.load_table((ns, "t")).properties
+    assert "saltation.p.k" not in rest_catalog.load_table((ns, "t")).properties
