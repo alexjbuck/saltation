@@ -27,8 +27,11 @@ Implementation plan (source of truth):
   COLUMN IF NOT EXISTS`, etc. No rollback machinery; same code path locally
   and in CI.
 - **Reset (`--reset` or `[dev].mode = "reset"`)**: explicit opt-in for the
-  rare evolution that genuinely cannot be expressed idempotently. Captures a
-  checkpoint, rolls back affected tables, re-runs.
+  rare evolution that genuinely cannot be expressed idempotently. Restores
+  every table and view `current.sql` has touched this dev cycle (its
+  baseline, kept across resets until commit/uncommit) and re-runs. Invariant,
+  property-tested: the catalog ends up as the committed state plus the
+  latest `current.sql`.
 
 This hierarchy shows up in defaults, error messages, docs, examples. Reset
 is **never** the recommended fix — only the last resort.
@@ -45,7 +48,9 @@ is **never** the recommended fix — only the last resort.
   kwargs verbatim. No first-class OAuth flow.
 - **Rollback primitive**: one atomic commit restoring four pointers
   (`SetSnapshotRefUpdate`, `SetCurrentSchemaUpdate`, `SetDefaultSpecUpdate`,
-  `SetDefaultSortOrderUpdate`) via `Transaction._apply()`. Private PyIceberg
+  `SetDefaultSortOrderUpdate`) via `Transaction._apply()`. The same commit
+  restores table properties, and removes `main` when the target predates
+  any snapshot. Private PyIceberg
   API — isolated in `src/cambrian/iceberg/txn.py` behind one wrapper
   function. File upstream for a public `Transaction.apply()`.
 - **Sidecar tables** in `_cambrian` namespace: `events`, `table_states`,
@@ -91,6 +96,12 @@ is **never** the recommended fix — only the last resort.
 - `SqlCatalog` does NOT replicate REST-catalog atomic multi-update
   semantics. Tests that exercise transactions, rollback, or snapshot
   semantics MUST run against Lakekeeper, not SqlCatalog.
+
+## Releases
+
+knope change files (`.changeset/*.md`, one per user-facing PR) drive the
+version and CHANGELOG; merging the release PR tags and publishes
+(TestPyPI, then PyPI behind an approval). See `docs/releasing.md`.
 
 ## Stacked-PR workflow
 
@@ -161,7 +172,6 @@ but worth knowing about so they don't get re-discovered:
   "what's currently in current.sql"). Either rename or null when
   `current.sql` is empty.
 - Custom sqlglot AST nodes (`AddPartitionField`, `WriteOrderedBy`,
-  `UnsetTblProperties`, etc.) have no SQL generator — calling
-  `.sql()` raises `ValueError`. The runner wraps with `_safe_sql`;
-  if you add a new custom node, either register a generator or only
-  call it via that helper.
+  etc.) render through `CambrianSpark.Generator.TRANSFORMS`. A new custom
+  node needs an entry there; `tests/unit/test_roundtrip_property.py`
+  fails until it renders back to the same AST.

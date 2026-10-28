@@ -29,6 +29,8 @@ operations must be siblings in this module that route through ``_commit``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from pyiceberg.exceptions import CommitFailedException, RESTError
 from pyiceberg.schema import Schema
 from pyiceberg.table import Table
@@ -36,17 +38,20 @@ from pyiceberg.table.refs import SnapshotRefType
 from pyiceberg.table.update import (
     AddSchemaUpdate,
     AssertRefSnapshotId,
+    RemovePropertiesUpdate,
+    RemoveSnapshotRefUpdate,
     SetCurrentSchemaUpdate,
     SetDefaultSortOrderUpdate,
     SetDefaultSpecUpdate,
     SetLocationUpdate,
+    SetPropertiesUpdate,
     SetSnapshotRefUpdate,
     TableRequirement,
     TableUpdate,
     UpgradeFormatVersionUpdate,
 )
 
-from cambrian.errors import ExternalWriteDetectedError, IllegalStateError
+from cambrian.errors import ExternalWriteDetectedError
 
 
 def restore_pointers(
@@ -57,8 +62,12 @@ def restore_pointers(
     target_spec_id: int,
     target_sort_order_id: int,
     expected_current_snapshot_id: int | None,
+    target_properties: Mapping[str, str] | None = None,
 ) -> None:
     """Atomically restore the four pointers (snapshot ref, schema, spec, sort order).
+
+    With ``target_properties``, the table's properties are restored in the same
+    commit (keys set to their old values, keys added since then removed).
 
     ``expected_current_snapshot_id`` is the snapshot id the caller observed on the
     ``main`` ref at the moment they decided to roll back. If the catalog disagrees at
@@ -71,21 +80,10 @@ def restore_pointers(
     assertion — there's no ``main`` ref to restore — and only rolls back the three
     metadata pointers.
 
-    The asymmetric case (``target_snapshot_id is None`` but the current table has a
-    snapshot) is degenerate: the checkpoint predates any append, but somehow appends
-    have happened that we now want to undo by reverting to "before main existed". We
-    refuse with ``IllegalStateError``: there's no safe semantics for "delete main" as
-    part of a rollback and the caller almost certainly has a bug.
+    When the checkpoint predates any append but the table has a snapshot now, the
+    ``main`` ref is removed, which leaves the table with no current snapshot as it
+    was, still guarded by the assertion on what ``main`` points at.
     """
-    if target_snapshot_id is None and expected_current_snapshot_id is not None:
-        msg = (
-            "checkpoint predates any append (target snapshot is None) but the table now "
-            f"has snapshot {expected_current_snapshot_id} on main; refusing to roll back. "
-            "Either the checkpoint is from before this table existed in its current form, "
-            "or the caller passed mismatched checkpoint/observation values."
-        )
-        raise IllegalStateError(msg)
-
     # ty doesn't understand Pydantic's snake_case-vs-kebab-case alias behaviour: it
     # sees only the `alias="schema-id"` etc. on these Field() declarations and flags the
     # snake_case kwargs as unknown. PyIceberg's own tests and the m4 prototype confirm
@@ -102,6 +100,18 @@ def restore_pointers(
     if target_snapshot_id is not None:
         updates = (_set_main_ref(target_snapshot_id), *updates)
         requirements = (_assert_main(expected_current_snapshot_id),)
+    elif expected_current_snapshot_id is not None:
+        updates = (_remove_main(), *updates)
+        requirements = (_assert_main(expected_current_snapshot_id),)
+
+    if target_properties is not None:
+        current = table.properties
+        changed = {k: v for k, v in target_properties.items() if current.get(k) != v}
+        removed = sorted(set(current) - set(target_properties))
+        if changed:
+            updates = (*updates, SetPropertiesUpdate(updates=changed))
+        if removed:
+            updates = (*updates, RemovePropertiesUpdate(removals=removed))
 
     try:
         _commit(table, updates, requirements)
@@ -187,6 +197,10 @@ def _set_main_ref(snapshot_id: int) -> SetSnapshotRefUpdate:
     # fmt: off
     return SetSnapshotRefUpdate(ref_name="main", type=SnapshotRefType.BRANCH, snapshot_id=snapshot_id)  # noqa: E501  # ty: ignore[unknown-argument, missing-argument]
     # fmt: on
+
+
+def _remove_main() -> RemoveSnapshotRefUpdate:
+    return RemoveSnapshotRefUpdate(ref_name="main")  # ty: ignore[unknown-argument, missing-argument]
 
 
 def _assert_main(snapshot_id: int | None) -> AssertRefSnapshotId:

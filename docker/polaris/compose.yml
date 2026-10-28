@@ -7,7 +7,7 @@
 #   bootstrap       - one-shot: creates the catalog + grants via the management API
 #
 # Version pins (chosen 2026-10-28):
-#   rustfs/rustfs:1.0.0-beta.4 - matches the Lakekeeper rig
+#   rustfs/rustfs:1.0.4 - matches the Lakekeeper rig
 #   apache/polaris:1.8.0       - latest stable release (Docker Hub, 2026-09-28)
 #
 # Persistence is in-memory: catalog state lives as long as the polaris
@@ -23,7 +23,7 @@ name: cambrian-test-polaris
 
 services:
   rustfs:
-    image: rustfs/rustfs:1.0.0-beta.4
+    image: rustfs/rustfs:1.0.4
     environment:
       RUSTFS_ACCESS_KEY: cambrian-access-key
       RUSTFS_SECRET_KEY: cambrian-secret-key

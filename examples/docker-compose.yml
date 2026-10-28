@@ -42,7 +42,7 @@ services:
       - cambrian-example
 
   rustfs:
-    image: rustfs/rustfs:1.0.0-beta.4
+    image: rustfs/rustfs:1.0.4
     environment:
       RUSTFS_ACCESS_KEY: cambrian-access-key
       RUSTFS_SECRET_KEY: cambrian-secret-key

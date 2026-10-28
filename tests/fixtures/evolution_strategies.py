@@ -34,6 +34,7 @@ __all__ = [
     "TableModel",
     "apply_script",
     "catalog_fingerprint",
+    "edited_scripts",
     "evolution_scripts",
 ]
 
@@ -152,6 +153,7 @@ class TableModel:
     dropped_partitions: set[tuple[str, str]] = field(default_factory=set)
     next_col: int = 0
     fv: int = 2
+    rows: int = 0
 
     def droppable(self, features: Features) -> list[Column]:
         blocked = self.pinned | self.identifier
@@ -176,6 +178,7 @@ class TableModel:
             "sort": list(self.sort),
             "props": dict(sorted(self.props.items())),
             "identifier": sorted(self.identifier),
+            "rows": self.rows,
         }
 
 
@@ -210,13 +213,18 @@ class Features:
     max_tables: int = 2
     # Format v3: create/upgrade v3 tables, column DEFAULTs, date -> timestamp.
     v3: bool = True
+    # Reset can't undo it: the spec forbids downgrading a format version.
+    upgrade_v3: bool = True
     views: bool = True
+    # INSERT isn't idempotent: only for scripts that are applied once.
+    insert: bool = False
 
 
 @dataclass
 class EvolutionScript:
     statements: list[str]
     expected: dict[str, dict[str, Any]]
+    models: dict[str, TableModel] = field(default_factory=dict, repr=False)
 
     def render(self, ns: str, upto: int | None = None) -> str:
         stmts = self.statements if upto is None else self.statements[:upto]
@@ -343,12 +351,28 @@ def _candidates(t: TableModel, features: Features) -> list[str]:
         kinds.append("unset_props")
     if features.identifier:
         kinds.append("identifier")
-    if features.v3:
-        if t.fv < 3:
-            kinds.append("upgrade_v3")
-        else:
-            kinds += ["set_default", "promote_date"]
+    if features.v3 and t.fv >= 3:
+        kinds += ["set_default", "promote_date"]
+    elif features.v3 and features.upgrade_v3:
+        kinds.append("upgrade_v3")
+    sources = [p.source for p in t.partition]
+    insertable = len(sources) == len(set(sources)) and all(
+        c.type.sql in _LITERALS for c in t.columns if c.required
+    )
+    if features.insert and t.fv < 3 and insertable:
+        kinds.append("insert")
     return kinds
+
+
+# Types INSERT ... VALUES can take a literal for (it has no typed literals yet).
+_LITERALS = {
+    INT.sql: "1",
+    BIGINT.sql: "2",
+    FLOAT.sql: "1.5",
+    DOUBLE.sql: "2.5",
+    STRING.sql: "'x'",
+    BOOLEAN.sql: "true",
+}
 
 
 @st.composite
@@ -506,6 +530,22 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
         t.altered.add(col.name)
         return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} TYPE TIMESTAMP_NTZ;"
 
+    if kind == "insert":
+        n = draw(st.integers(min_value=1, max_value=3))
+        values = ", ".join(
+            "("
+            + ", ".join(
+                _LITERALS[c.type.sql]
+                if c.required or (c.type.sql in _LITERALS and draw(st.booleans()))
+                else "NULL"
+                for c in t.columns
+            )
+            + ")"
+            for _ in range(n)
+        )
+        t.rows += n
+        return f"INSERT INTO {tbl} VALUES {values};"
+
     raise AssertionError(kind)
 
 
@@ -523,7 +563,43 @@ def evolution_scripts(
         sql, model = draw(_create(f"t{i}", features))
         statements.append(sql)
         tables[model.name] = model
+    return draw(_finish(statements, tables, {}, features, min_steps, max_steps))
 
+
+@st.composite
+def edited_scripts(
+    draw: st.DrawFn,
+    base: EvolutionScript,
+    features: Features = Features(),
+    max_steps: int = 8,
+) -> EvolutionScript:
+    """A ``current.sql`` that continues from *base*'s end state.
+
+    It may create the next ``e<n>`` table, the same name in every edit from
+    one base, so successive edits disagree about a table none of them can
+    assume exists.
+    """
+    statements: list[str] = []
+    tables = copy.deepcopy(base.models)
+    if draw(st.booleans()):
+        name = f"e{sum(1 for t in tables if t.startswith('e'))}"
+        sql, model = draw(_create(name, features))
+        statements.append(sql)
+        tables[model.name] = model
+    expected = {k: v for k, v in base.expected.items() if k.startswith("view:")}
+    return draw(_finish(statements, tables, expected, features, 0, max_steps))
+
+
+@st.composite
+def _finish(
+    draw: st.DrawFn,
+    statements: list[str],
+    tables: dict[str, TableModel],
+    views: dict[str, dict[str, Any]],
+    features: Features,
+    min_steps: int,
+    max_steps: int,
+) -> EvolutionScript:
     n_steps = draw(st.integers(min_value=min_steps, max_value=max_steps))
     for _ in range(n_steps):
         t = tables[draw(st.sampled_from(sorted(tables)))]
@@ -537,6 +613,7 @@ def evolution_scripts(
     expected: dict[str, dict[str, Any]] = {
         name: m.fingerprint() for name, m in sorted(tables.items())
     }
+    expected.update(views)
     # Views last: a view's schema is inferred when it's applied, so a later
     # ALTER of its source would (correctly) make a replay infer differently.
     if features.views:
@@ -552,7 +629,7 @@ def evolution_scripts(
                 "columns": [(c.name, c.type.iceberg, False, None, None) for c in cols]
             }
 
-    return EvolutionScript(statements=statements, expected=expected)
+    return EvolutionScript(statements=statements, expected=expected, models=tables)
 
 
 def apply_script(
@@ -564,6 +641,11 @@ def apply_script(
     """Parse and dispatch *sql* statement-by-statement, mirroring the runner loop."""
     for stmt in parse_script(sql, view_source_dialect=view_source_dialect):
         dispatch(catalog, stmt, view_dialects=view_dialects)
+
+
+def _row_count(table: Any) -> int:
+    snap = table.current_snapshot()
+    return int(snap.summary["total-records"]) if snap and snap.summary else 0
 
 
 def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str, Any]]:
@@ -593,6 +675,7 @@ def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str,
             ],
             "props": dict(sorted(props.items())),
             "identifier": sorted(schema.identifier_field_names()),
+            "rows": _row_count(table),
         }
     for ident in sorted(catalog.list_views(namespace)):
         view_schema = catalog.load_view(ident).schema()

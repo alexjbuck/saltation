@@ -10,8 +10,7 @@
 #
 # Version pins (chosen 2026-05-25):
 #   postgres:17               - latest stable
-#   rustfs/rustfs:1.0.0-beta.4 - newest pre-1.0 (rustfs has no GA yet; betas
-#                               are what's shipped on Docker Hub)
+#   rustfs/rustfs:1.0.4       - latest stable
 #   quay.io/lakekeeper/catalog:v0.14.2 - latest stable GitHub release
 
 name: cambrian-test
@@ -36,7 +35,7 @@ services:
       - cambrian
 
   rustfs:
-    image: rustfs/rustfs:1.0.0-beta.4
+    image: rustfs/rustfs:1.0.4
     environment:
       RUSTFS_ACCESS_KEY: cambrian-access-key
       RUSTFS_SECRET_KEY: cambrian-secret-key

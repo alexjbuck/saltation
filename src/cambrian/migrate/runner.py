@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.exceptions import NoSuchTableError, NoSuchViewError
+from pyiceberg.serializers import FromInputFile
 from sqlglot import expressions as exp
 
 from cambrian.catalog import load_catalog
@@ -36,12 +37,17 @@ from cambrian.errors import (
 from cambrian.iceberg.affected import (
     TableIdent,
     affected_tables_with_overrides,
+    affected_views,
 )
 from cambrian.iceberg.checkpoint import Checkpoint, capture, pin
 from cambrian.iceberg.txn import restore_pointers
+from cambrian.iceberg.views import require_rest
+from cambrian.iceberg.views import set_current_version as set_current_view_version
 from cambrian.sidecar.events import (
+    Event,
     TableStateRow,
     applied_committed_ids,
+    events,
     latest_event,
     table_states_for_event,
     write_event,
@@ -123,8 +129,12 @@ def apply_idempotent(
     *,
     allow_partial: bool = False,
     actor: str | None = None,
+    rerun: bool = False,
 ) -> ApplyResult:
     """Apply committed evolutions + ``current.sql`` in idempotent mode.
+
+    ``rerun`` skips the unchanged-hash short-circuit (reset has just rolled
+    the state back, so the text must run again even if it hasn't changed).
 
     Steps:
 
@@ -161,8 +171,7 @@ def apply_idempotent(
     current_sql_path = _resolve_current_sql(config)
     expanded = expand(current_sql_path)
 
-    last = latest_event(catalog, namespace, event_type="apply", evolution_id="current")
-    if last is not None and last.evolution_hash == expanded.hash:
+    if not rerun and _applied_and_standing(catalog, namespace, expanded.hash):
         return ApplyResult(
             status="unchanged",
             evolution_hash=expanded.hash,
@@ -180,6 +189,8 @@ def apply_idempotent(
     state_by_ident: dict[str, _TableStateAccumulator] = {}
     for ident in _unique_tables(per_stmt_tables):
         state_by_ident[str(ident)] = _capture_pre(catalog, ident)
+    views = _unique_tables(affected_views(s) for s in statements)
+    view_rows = [_baseline_view_row(catalog, v) for v in views]
 
     statement_results: list[StatementResult] = []
     overall_error: str | None = None
@@ -231,7 +242,7 @@ def apply_idempotent(
         evolution_sql=expanded.text,
         actor=actor or _default_actor(),
         notes=notes,
-        table_states=[acc.to_row() for acc in state_by_ident.values()],
+        table_states=[*(acc.to_row() for acc in state_by_ident.values()), *view_rows],
     )
 
     # If we hit a fatal error under ``allow_partial=False`` the event is
@@ -507,6 +518,7 @@ class _TableStateAccumulator:
     pre_spec_id: int | None = None
     pre_sort_order_id: int | None = None
     pre_metadata_loc: str | None = None
+    pre_properties: dict[str, str] | None = None
     post_snapshot_id: int | None = None
     post_schema_id: int | None = None
     post_spec_id: int | None = None
@@ -530,6 +542,7 @@ class _TableStateAccumulator:
             pre_spec_id=self.pre_spec_id,
             pre_sort_order_id=self.pre_sort_order_id,
             pre_metadata_loc=self.pre_metadata_loc,
+            pre_properties=self.pre_properties,
             post_snapshot_id=self.post_snapshot_id,
             post_schema_id=self.post_schema_id,
             post_spec_id=self.post_spec_id,
@@ -548,6 +561,7 @@ def _capture_pre(catalog: Catalog, ident: TableIdent) -> _TableStateAccumulator:
     acc.pre_spec_id = cp.spec_id
     acc.pre_sort_order_id = cp.sort_order_id
     acc.pre_metadata_loc = cp.metadata_loc
+    acc.pre_properties = dict(table.properties)
     return acc
 
 
@@ -600,8 +614,217 @@ class ResetResult:
     error: str | None = None
 
 
+def _applied_and_standing(catalog: Catalog, namespace: str, evolution_hash: str) -> bool:
+    """Whether this exact ``current.sql`` was the last thing applied and no rollback undid it."""
+    last = latest_event(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID)
+    if last is None or last.evolution_hash != evolution_hash:
+        return False
+    undo = latest_event(
+        catalog, namespace, event_type="rollback", evolution_id=CURRENT_EVOLUTION_ID
+    )
+    return undo is None or undo.event_ts < last.event_ts
+
+
 def _checkpoint_tag(evolution_id: str) -> str:
     return f"{CHECKPOINT_TAG_PREFIX}{evolution_id}"
+
+
+# The reset baseline: what every table and view a reset has touched looked
+# like before ``current.sql`` was first applied, keyed by (kind, ident). An
+# object is added the first time a reset sees it in ``current.sql``; nothing
+# has changed it since the baseline began, so its state at that moment *is*
+# its pre-``current.sql`` state. The baseline is carried forward unchanged
+# by every reset (a ``checkpoint`` event) until a commit or uncommit starts
+# a new dev cycle.
+_Baseline = dict[tuple[str, str], TableStateRow]
+
+
+def _load_baseline(catalog: Catalog, namespace: str) -> _Baseline:
+    """The baseline recorded by the last reset, completed from this cycle's applies.
+
+    Idempotent applies record each table's pre-state too, so a table first
+    touched by one of those (before any reset, or by ``cambrian apply``
+    between resets) gets the pre-state of the earliest such apply.
+    """
+    boundaries = [
+        e.event_ts
+        for kind in ("commit", "uncommit")
+        if (e := latest_event(catalog, namespace, event_type=kind)) is not None
+    ]
+    cycle_start = max(boundaries, default=None)
+
+    def in_cycle(event: Event) -> bool:
+        return cycle_start is None or event.event_ts > cycle_start
+
+    baseline: _Baseline = {}
+    checkpoint = latest_event(
+        catalog, namespace, event_type="checkpoint", evolution_id=CURRENT_EVOLUTION_ID
+    )
+    if checkpoint is not None and in_cycle(checkpoint):
+        for r in table_states_for_event(catalog, namespace, event_id=checkpoint.event_id):
+            baseline[(r.object_kind, r.table_ident)] = r
+    for apply in events(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID):
+        if not in_cycle(apply):
+            continue
+        for r in table_states_for_event(catalog, namespace, event_id=apply.event_id):
+            baseline.setdefault((r.object_kind, r.table_ident), _pre_only(r))
+    return baseline
+
+
+def _pre_only(row: TableStateRow) -> TableStateRow:
+    return TableStateRow(
+        table_ident=row.table_ident,
+        object_kind=row.object_kind,
+        pre_snapshot_id=row.pre_snapshot_id,
+        pre_schema_id=row.pre_schema_id,
+        pre_spec_id=row.pre_spec_id,
+        pre_sort_order_id=row.pre_sort_order_id,
+        pre_metadata_loc=row.pre_metadata_loc,
+        pre_properties=row.pre_properties,
+        pre_view_version_id=row.pre_view_version_id,
+    )
+
+
+def _baseline_table_row(catalog: Catalog, ident: TableIdent) -> TableStateRow:
+    table = _load_or_none(catalog, ident)
+    if table is None:
+        return TableStateRow(table_ident=str(ident))
+    cp = capture(table)
+    tag = _checkpoint_tag(CURRENT_EVOLUTION_ID)
+    try:
+        pin(table, tag_name=tag, snapshot_id=cp.snapshot_id)
+    except Exception:
+        tag = None
+    return TableStateRow(
+        table_ident=str(ident),
+        pre_snapshot_id=cp.snapshot_id,
+        pre_schema_id=cp.schema_id,
+        pre_spec_id=cp.spec_id,
+        pre_sort_order_id=cp.sort_order_id,
+        pre_metadata_loc=cp.metadata_loc,
+        pre_properties=dict(table.properties),
+        tag_ref=tag if cp.snapshot_id is not None else None,
+    )
+
+
+def _baseline_view_row(catalog: Catalog, ident: TableIdent) -> TableStateRow:
+    try:
+        view = catalog.load_view(_ident_to_tuple(ident))
+    except NoSuchViewError:
+        return TableStateRow(table_ident=str(ident), object_kind="view")
+    return TableStateRow(
+        table_ident=str(ident),
+        object_kind="view",
+        pre_view_version_id=view.metadata.current_version_id,
+    )
+
+
+def _upgraded_since(catalog: Catalog, row: TableStateRow) -> bool:
+    table = catalog.load_table(_ident_str_to_tuple(row.table_ident))
+    if table.format_version == 1 or row.pre_metadata_loc is None:
+        return False
+    try:
+        base = FromInputFile.table_metadata(table.io.new_input(row.pre_metadata_loc))
+    except (FileNotFoundError, OSError):
+        # Old metadata files can be cleaned up; the commit itself will then
+        # fail on any field the old schema can't express.
+        return False
+    return table.format_version > base.format_version
+
+
+def _existed(row: TableStateRow) -> bool:
+    if row.object_kind == "view":
+        return row.pre_view_version_id is not None
+    return row.pre_metadata_loc is not None
+
+
+def _exists(catalog: Catalog, row: TableStateRow) -> bool:
+    ident = _ident_str_to_tuple(row.table_ident)
+    if row.object_kind == "view":
+        return catalog.view_exists(ident)
+    return catalog.table_exists(ident)
+
+
+def _restore_baseline(catalog: Catalog, baseline: _Baseline) -> list[TableRollback]:
+    """Put every baselined object back the way it was before ``current.sql``."""
+    lost = sorted(
+        f"{r.object_kind} {r.table_ident}"
+        for r in baseline.values()
+        if _existed(r) and not _exists(catalog, r)
+    )
+    if lost:
+        msg = (
+            f"reset can't restore {', '.join(lost)}: dropped or renamed since current.sql "
+            "was first applied. Recreate it as it was, or commit/uncommit to start a new "
+            "baseline."
+        )
+        raise IllegalStateError(msg)
+    upgraded = sorted(
+        r.table_ident
+        for r in baseline.values()
+        if r.object_kind == "table" and _existed(r) and _upgraded_since(catalog, r)
+    )
+    if upgraded:
+        msg = (
+            f"reset can't restore {', '.join(upgraded)}: current.sql upgraded its format "
+            "version, and Iceberg tables can't be downgraded. Commit the upgrade on its own, "
+            "or drop and recreate the table."
+        )
+        raise IllegalStateError(msg)
+
+    rollbacks: list[TableRollback] = []
+    for row in baseline.values():
+        ident = _ident_str_to_tuple(row.table_ident)
+        if not _existed(row):
+            if not _exists(catalog, row):
+                continue
+            if row.object_kind == "view":
+                catalog.drop_view(ident)
+            else:
+                catalog.drop_table(ident)
+            rollbacks.append(
+                TableRollback(
+                    ident=row.table_ident,
+                    rolled_back=True,
+                    reason=f"dropped: {row.object_kind} created by current.sql",
+                )
+            )
+            continue
+        if row.object_kind == "view":
+            view = catalog.load_view(ident)
+            target = row.pre_view_version_id
+            if target is not None and view.metadata.current_version_id != target:
+                set_current_view_version(require_rest(catalog), view, target)
+                rollbacks.append(
+                    TableRollback(
+                        ident=row.table_ident, rolled_back=True, reason="view version restored"
+                    )
+                )
+            continue
+        cp = _row_to_checkpoint(row)
+        assert cp is not None
+        table = catalog.load_table(ident)
+        snap = table.current_snapshot()
+        current_snap = snap.snapshot_id if snap is not None else None
+        restore_pointers(
+            table,
+            target_snapshot_id=cp.snapshot_id,
+            target_schema_id=cp.schema_id,
+            target_spec_id=cp.spec_id,
+            target_sort_order_id=cp.sort_order_id,
+            expected_current_snapshot_id=current_snap,
+            target_properties=row.pre_properties,
+        )
+        rollbacks.append(
+            TableRollback(
+                ident=row.table_ident,
+                rolled_back=True,
+                from_snapshot_id=current_snap,
+                to_snapshot_id=cp.snapshot_id,
+                reason="restored to its state before current.sql",
+            )
+        )
+    return rollbacks
 
 
 def _row_to_checkpoint(row: TableStateRow) -> Checkpoint | None:
@@ -627,34 +850,6 @@ def _row_to_checkpoint(row: TableStateRow) -> Checkpoint | None:
     )
 
 
-def _load_prior_checkpoints(
-    catalog: Catalog,
-    namespace: str,
-    *,
-    evolution_id: str,
-) -> dict[str, Checkpoint]:
-    """Read every per-table checkpoint stashed by the most recent ``rollback`` event.
-
-    Reset writes a rollback event each cycle whose ``pre_*`` fields encode
-    the captured-fresh state of each affected table at the start of that
-    reset cycle — *the state we want to roll back to* on the next reset.
-    The latest ``apply`` event's pre-fields would carry idempotent-mode
-    state which doesn't include the checkpoint capture.
-
-    Returns an empty dict if no prior rollback event exists.
-    """
-    prior = latest_event(catalog, namespace, event_type="rollback", evolution_id=evolution_id)
-    if prior is None:
-        return {}
-    rows = table_states_for_event(catalog, namespace, event_id=prior.event_id)
-    out: dict[str, Checkpoint] = {}
-    for row in rows:
-        cp = _row_to_checkpoint(row)
-        if cp is not None:
-            out[row.table_ident] = cp
-    return out
-
-
 def _load_post_snapshots(
     catalog: Catalog,
     namespace: str,
@@ -671,7 +866,57 @@ def _load_post_snapshots(
     if prior is None:
         return {}
     rows = table_states_for_event(catalog, namespace, event_id=prior.event_id)
-    return {row.table_ident: row.post_snapshot_id for row in rows}
+    return {row.table_ident: row.post_snapshot_id for row in rows if row.object_kind == "table"}
+
+
+def _expected_snapshots(
+    catalog: Catalog, namespace: str, baseline: _Baseline
+) -> dict[str, int | None]:
+    """Where cambrian last left each table's ``main``: the last apply, or a rollback after it."""
+    last = latest_event(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID)
+    undo = latest_event(
+        catalog, namespace, event_type="rollback", evolution_id=CURRENT_EVOLUTION_ID
+    )
+    if undo is not None and (last is None or undo.event_ts > last.event_ts):
+        return {
+            ident: row.pre_snapshot_id
+            for (kind, ident), row in baseline.items()
+            if kind == "table" and _existed(row)
+        }
+    return _load_post_snapshots(catalog, namespace, evolution_id=CURRENT_EVOLUTION_ID)
+
+
+def _write_baseline(
+    catalog: Catalog,
+    namespace: str,
+    baseline: _Baseline,
+    *,
+    evolution_hash: str,
+    evolution_sql: str,
+    actor: str,
+    rollbacks: list[TableRollback],
+) -> str:
+    write_event(
+        catalog,
+        namespace,
+        event_type="checkpoint",
+        evolution_id=CURRENT_EVOLUTION_ID,
+        evolution_hash=evolution_hash,
+        evolution_sql=evolution_sql,
+        actor=actor,
+        notes=f"reset baseline: {len(baseline)} objects",
+        table_states=list(baseline.values()),
+    )
+    return write_event(
+        catalog,
+        namespace,
+        event_type="rollback",
+        evolution_id=CURRENT_EVOLUTION_ID,
+        evolution_hash=evolution_hash,
+        evolution_sql=evolution_sql,
+        actor=actor,
+        notes=f"rolled back {len(rollbacks)} of {len(baseline)} objects to the reset baseline",
+    )
 
 
 def apply_reset(
@@ -684,27 +929,22 @@ def apply_reset(
     """Apply ``current.sql`` in reset mode.
 
     Reset is the relief valve for non-idempotent SQL — never the default
-    path. The flow:
+    path. Every table and view any version of ``current.sql`` has touched
+    goes back to how it stood before ``current.sql`` was first applied
+    (objects it created are dropped), then the current text runs once. So
+    after any sequence of edits the catalog is the committed state plus the
+    latest ``current.sql``.
 
-    1. Expand + hash ``current.sql``; short-circuit if the hash matches the
-       last reset's apply event AND no external writes are detected.
-    2. Discover affected tables.
-    3. Load prior checkpoints from the last ``apply`` event for ``current``
-       (if any). For tables with no prior checkpoint, capture and pin one
-       now so a *future* reset can roll back to this state.
-    4. External-write detection: each table's current ``main`` snapshot id
-       must match the prior apply's ``post_snapshot_id``. Divergence is an
+    1. Short-circuit if the text matches the last apply and nothing moved.
+    2. External-write detection against the last apply's post snapshots;
        :class:`ExternalWriteDetectedError` unless ``force=True``.
-    5. Roll back each table to its checkpoint via the M4 four-pointer
-       restore. Tables without a prior checkpoint are skipped (nothing to
-       roll back to).
-    6. Emit a ``rollback`` event capturing what moved.
-    7. Re-execute the SQL via :func:`apply_idempotent`. Emit its ``apply``
-       event with the new post-state.
+    3. Add newly touched objects to the baseline, restore the baseline
+       (``checkpoint`` and ``rollback`` events), then apply.
 
     Raises:
         ExternalWriteDetectedError: a table moved out-of-band and ``force``
             is false.
+        IllegalStateError: a baselined object was dropped or renamed.
         CambrianError: any of the underlying parse/dispatch/commit errors.
     """
     current_sql_path = _resolve_current_sql(config)
@@ -712,152 +952,63 @@ def apply_reset(
     catalog = load_catalog(config)
     state = ensure_current(catalog, config.evolutions.sidecar_namespace, allow_read_only=False)
     namespace = state.sidecar_namespace
+    actor = actor or _default_actor()
 
-    statements_raw = parse_script(expanded.text, view_source_dialect=config.views.source_dialect)
-    statements = [s for s in statements_raw if s is not None]
-    per_stmt_tables = affected_tables_with_overrides(expanded.text, statements)
-    idents = _unique_tables(per_stmt_tables)
+    statements = [
+        s
+        for s in parse_script(expanded.text, view_source_dialect=config.views.source_dialect)
+        if s is not None
+    ]
+    idents = _unique_tables(affected_tables_with_overrides(expanded.text, statements))
+    view_idents = _unique_tables(affected_views(s) for s in statements)
 
-    prior_checkpoints = _load_prior_checkpoints(
-        catalog, namespace, evolution_id=CURRENT_EVOLUTION_ID
+    baseline = _load_baseline(catalog, namespace)
+    prior_post_snapshots = _expected_snapshots(catalog, namespace, baseline)
+    watched = _unique_tables(
+        [idents, [TableIdent(*_split(k)) for (kind, k) in baseline if kind == "table"]]
     )
-    prior_post_snapshots = _load_post_snapshots(
-        catalog, namespace, evolution_id=CURRENT_EVOLUTION_ID
-    )
-
-    if not force:
-        diverged = _check_external_writes(catalog, idents, prior_post_snapshots)
-        if diverged:
-            details = ", ".join(diverged)
-            raise ExternalWriteDetectedError(
-                ref=f"main (tables: {details})",
-                expected_snapshot_id=None,
-                observed_snapshot_id=None,
-            )
-
-    rollbacks: list[TableRollback] = []
-
-    # Phase 1: snapshot the pre-reset state of every affected table. This
-    # is what the *next* reset will roll back to — captured before phase 2
-    # so it survives the upcoming rollback.
-    pre_reset_states: dict[str, Checkpoint] = {}
-    tag_name = _checkpoint_tag(CURRENT_EVOLUTION_ID)
-    for ident in idents:
-        table = _load_or_none(catalog, ident)
-        if table is None:
-            continue
-        cp_pre = capture(table)
-        pre_reset_states[str(ident)] = cp_pre
-        try:
-            pin(table, tag_name=tag_name, snapshot_id=cp_pre.snapshot_id)
-        except Exception:
-            pass
-
-    # Phase 2: roll back to the prior reset's checkpoint, if any.
-    for ident in idents:
-        ident_str = str(ident)
-        table = _load_or_none(catalog, ident)
-        if table is None:
-            rollbacks.append(
-                TableRollback(
-                    ident=ident_str,
-                    rolled_back=False,
-                    reason="table does not exist yet",
-                )
-            )
-            continue
-
-        cp = prior_checkpoints.get(ident_str)
-        pre_snap = table.current_snapshot()
-        pre_snap_id = pre_snap.snapshot_id if pre_snap is not None else None
-
-        if cp is None:
-            rollbacks.append(
-                TableRollback(
-                    ident=ident_str,
-                    rolled_back=False,
-                    from_snapshot_id=pre_snap_id,
-                    to_snapshot_id=pre_snap_id,
-                    reason="no prior checkpoint; captured one for next reset",
-                )
-            )
-            continue
-
-        restore_pointers(
-            table,
-            target_snapshot_id=cp.snapshot_id,
-            target_schema_id=cp.schema_id,
-            target_spec_id=cp.spec_id,
-            target_sort_order_id=cp.sort_order_id,
-            expected_current_snapshot_id=pre_snap_id,
-        )
-        rolled_back_table = catalog.load_table(_ident_to_tuple(ident))
-        post_snap = rolled_back_table.current_snapshot()
-        post_snap_id = post_snap.snapshot_id if post_snap is not None else None
-        rollbacks.append(
-            TableRollback(
-                ident=ident_str,
-                rolled_back=True,
-                from_snapshot_id=pre_snap_id,
-                to_snapshot_id=post_snap_id,
-                reason="rolled back to prior checkpoint",
-            )
+    diverged = _check_external_writes(catalog, watched, prior_post_snapshots)
+    if diverged and not force:
+        raise ExternalWriteDetectedError(
+            ref=f"main (tables: {', '.join(diverged)})",
+            expected_snapshot_id=None,
+            observed_snapshot_id=None,
         )
 
-    # Phase 3: re-execute the SQL against the rolled-back tables.
+    if not diverged and _applied_and_standing(catalog, namespace, expanded.hash):
+        return ResetResult(
+            status="unchanged", evolution_hash=expanded.hash, sources=expanded.sources
+        )
+
+    for ident in idents:
+        baseline.setdefault(("table", str(ident)), _baseline_table_row(catalog, ident))
+    for ident in view_idents:
+        baseline.setdefault(("view", str(ident)), _baseline_view_row(catalog, ident))
+
+    rollbacks = _restore_baseline(catalog, baseline)
+    rollback_event_id = _write_baseline(
+        catalog,
+        namespace,
+        baseline,
+        evolution_hash=expanded.hash,
+        evolution_sql=expanded.text,
+        actor=actor,
+        rollbacks=rollbacks,
+    )
+
     try:
-        apply_result = apply_idempotent(config, allow_partial=allow_partial, actor=actor)
+        apply_result = apply_idempotent(
+            config, allow_partial=allow_partial, actor=actor, rerun=True
+        )
     except CambrianError as err:
         return ResetResult(
             status="partial",
             evolution_hash=expanded.hash,
             sources=expanded.sources,
             rollbacks=rollbacks,
+            rollback_event_id=rollback_event_id,
             error=str(err),
         )
-
-    # Phase 4: record the pre-reset states captured in phase 1 as the
-    # next reset's rollback target. Tables that didn't exist at reset start
-    # (i.e. were created by the apply) do NOT get a row — we can't
-    # restore to "doesn't exist" with the 4-pointer primitive. The next
-    # reset will treat those as fresh (and capture a checkpoint then).
-    rollback_states: list[TableStateRow] = []
-    for ident in idents:
-        ident_str = str(ident)
-        cp = pre_reset_states.get(ident_str)
-        if cp is None:
-            continue
-        rollback_states.append(
-            TableStateRow(
-                table_ident=ident_str,
-                pre_snapshot_id=cp.snapshot_id,
-                pre_schema_id=cp.schema_id,
-                pre_spec_id=cp.spec_id,
-                pre_sort_order_id=cp.sort_order_id,
-                pre_metadata_loc=cp.metadata_loc,
-                post_snapshot_id=cp.snapshot_id,
-                post_schema_id=cp.schema_id,
-                post_spec_id=cp.spec_id,
-                post_sort_order_id=cp.sort_order_id,
-                tag_ref=tag_name if cp.snapshot_id is not None else None,
-            )
-        )
-
-    rollback_event_id = write_event(
-        catalog,
-        namespace,
-        event_type="rollback",
-        evolution_id=CURRENT_EVOLUTION_ID,
-        evolution_hash=expanded.hash,
-        evolution_sql=expanded.text,
-        actor=actor or _default_actor(),
-        notes=(
-            f"rolled back {sum(1 for r in rollbacks if r.rolled_back)} "
-            f"of {len(rollbacks)} tables; captured {len(rollback_states)} "
-            "pre-reset checkpoints for next reset"
-        ),
-        table_states=rollback_states,
-    )
 
     return ResetResult(
         status=apply_result.status,
@@ -876,112 +1027,32 @@ def rollback_to_last_checkpoint(
     *,
     actor: str | None = None,
 ) -> ResetResult:
-    """Roll the affected tables of the last ``apply`` for ``current`` back to their checkpoints.
+    """Undo ``current.sql``: restore the reset baseline without re-applying.
 
-    Does not re-execute ``current.sql`` afterwards. Used by ``cambrian
-    rollback``: useful for "I want to undo the dev work I just did and
-    re-edit ``current.sql`` from scratch". Emits a ``rollback`` event only.
-
-    The set of "affected tables" is determined by the last apply event's
-    ``table_states`` rows, not by re-parsing ``current.sql``. This matches
-    user intent: you're rolling back the *state that was last applied*,
-    even if ``current.sql`` has since changed in ways that would now
-    touch different tables.
+    Used by ``cambrian rollback`` ("undo the dev work and re-edit
+    ``current.sql`` from scratch"). Objects touched only by idempotent
+    applies since the baseline began are not tracked; the next reset adds
+    them. Emits ``checkpoint`` and ``rollback`` events.
     """
     catalog = load_catalog(config)
     state = ensure_current(catalog, config.evolutions.sidecar_namespace, allow_read_only=False)
     namespace = state.sidecar_namespace
 
     prior = latest_event(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID)
-    if prior is None:
-        # Nothing has been applied; nothing to roll back. Surface a
-        # ResetResult with status=unchanged so callers can render a
-        # sensible message.
-        return ResetResult(
-            status="unchanged",
-            evolution_hash="",
-            sources=[],
-            rollbacks=[],
-        )
+    baseline = _load_baseline(catalog, namespace)
+    if prior is None or not baseline:
+        return ResetResult(status="unchanged", evolution_hash="", sources=[], rollbacks=[])
 
-    rows = table_states_for_event(catalog, namespace, event_id=prior.event_id)
-    rollbacks: list[TableRollback] = []
-    rollback_states: list[TableStateRow] = []
-
-    for row in rows:
-        cp = _row_to_checkpoint(row)
-        if cp is None:
-            rollbacks.append(
-                TableRollback(
-                    ident=row.table_ident,
-                    rolled_back=False,
-                    reason="no prior checkpoint",
-                )
-            )
-            continue
-        # Parse "ns.t" back into a tuple for catalog.load_table.
-        ident_tuple = _ident_str_to_tuple(row.table_ident)
-        try:
-            table = catalog.load_table(ident_tuple)
-        except NoSuchTableError:
-            rollbacks.append(
-                TableRollback(
-                    ident=row.table_ident,
-                    rolled_back=False,
-                    reason="table no longer exists",
-                )
-            )
-            continue
-
-        current = table.current_snapshot()
-        from_snap = current.snapshot_id if current is not None else None
-        restore_pointers(
-            table,
-            target_snapshot_id=cp.snapshot_id,
-            target_schema_id=cp.schema_id,
-            target_spec_id=cp.spec_id,
-            target_sort_order_id=cp.sort_order_id,
-            expected_current_snapshot_id=from_snap,
-        )
-        rolled = catalog.load_table(ident_tuple)
-        post = rolled.current_snapshot()
-        rollbacks.append(
-            TableRollback(
-                ident=row.table_ident,
-                rolled_back=True,
-                from_snapshot_id=from_snap,
-                to_snapshot_id=post.snapshot_id if post is not None else None,
-                reason="rolled back to prior checkpoint",
-            )
-        )
-        rollback_states.append(
-            TableStateRow(
-                table_ident=row.table_ident,
-                pre_snapshot_id=from_snap,
-                pre_schema_id=rolled.schema().schema_id,
-                pre_spec_id=rolled.spec().spec_id,
-                pre_sort_order_id=rolled.sort_order().order_id,
-                pre_metadata_loc=rolled.metadata_location,
-                post_snapshot_id=cp.snapshot_id,
-                post_schema_id=cp.schema_id,
-                post_spec_id=cp.spec_id,
-                post_sort_order_id=cp.sort_order_id,
-                tag_ref=cp.tag_ref,
-            )
-        )
-
-    event_id = write_event(
+    rollbacks = _restore_baseline(catalog, baseline)
+    event_id = _write_baseline(
         catalog,
         namespace,
-        event_type="rollback",
-        evolution_id=CURRENT_EVOLUTION_ID,
+        baseline,
         evolution_hash=prior.evolution_hash,
         evolution_sql=prior.evolution_sql,
         actor=actor or _default_actor(),
-        notes=f"manual rollback of {sum(1 for r in rollbacks if r.rolled_back)} tables",
-        table_states=rollback_states,
+        rollbacks=rollbacks,
     )
-
     return ResetResult(
         status="applied",
         evolution_hash=prior.evolution_hash,
@@ -989,6 +1060,11 @@ def rollback_to_last_checkpoint(
         rollbacks=rollbacks,
         rollback_event_id=event_id,
     )
+
+
+def _split(ident: str) -> tuple[str | None, str]:
+    ns, _, name = ident.rpartition(".")
+    return (ns or None, name)
 
 
 def _check_external_writes(

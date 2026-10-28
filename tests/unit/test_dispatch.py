@@ -88,6 +88,8 @@ def _make_table() -> MagicMock:
         MagicMock(name="name", required=False),
     ]
     table.schema.return_value = schema
+    table.format_version = 2
+    table.spec.return_value.fields = []
     return table
 
 

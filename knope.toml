@@ -1,0 +1,62 @@
+[package]
+versioned_files = ["pyproject.toml"]
+changelog = "CHANGELOG.md"
+assets = "dist/*"
+
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+# Runs on every push to main (.github/workflows/prepare-release.yml): turns the
+# pending .changeset/ files into a version bump + CHANGELOG entry and opens
+# (or refreshes) the release PR. Merging that PR runs `release`.
+[[workflows]]
+name = "prepare-release"
+
+[[workflows.steps]]
+type = "Command"
+command = "git switch -c release"
+
+# Release notes come from .changeset/ files only, not commit messages.
+[[workflows.steps]]
+type = "PrepareRelease"
+ignore_conventional_commits = true
+
+# knope bumps pyproject.toml; uv.lock records the project's own version too.
+[[workflows.steps]]
+type = "Command"
+command = "uv lock"
+
+[[workflows.steps]]
+type = "Command"
+command = "git add uv.lock"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m \"chore: prepare release $version\""
+
+[[workflows.steps]]
+type = "Command"
+command = "git push --force --set-upstream origin release"
+
+[[workflows.steps]]
+type = "CreatePullRequest"
+base = "main"
+
+[workflows.steps.title]
+template = "chore: prepare release $version"
+
+[workflows.steps.body]
+template = "Merging this PR tags v$version, creates the GitHub release, publishes to TestPyPI, and then waits for approval to publish to PyPI.\n\n$changelog"
+
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "Release"
+
+[github]
+owner = "alexjbuck"
+repo = "cambrian"

@@ -31,6 +31,7 @@ __all__ = [
     "SELF_MIGRATIONS",
     "TABLE_STATES_SCHEMA",
     "TABLE_STATES_TABLE",
+    "TABLE_STATES_V2_FIELDS",
     "VERSION_SCHEMA",
     "VERSION_TABLE",
 ]
@@ -112,7 +113,31 @@ def _v0_to_v1_initial(catalog: Catalog, namespace: str) -> None:
     _create_initial_sidecar(catalog, namespace)
 
 
-SELF_MIGRATIONS = [_v0_to_v1_initial]
+# v2: what reset needs to restore a table or view to its state before
+# ``current.sql`` was first applied, beyond the four pointers. ``object_kind``
+# is "table" (or null, for v1 rows) or "view"; ``pre_properties`` is the
+# table's properties as a JSON object; ``pre_view_version_id`` is a view's
+# current version.
+TABLE_STATES_V2_FIELDS = (
+    NestedField(field_id=14, name="object_kind", field_type=StringType(), required=False),
+    NestedField(field_id=15, name="pre_properties", field_type=StringType(), required=False),
+    NestedField(field_id=16, name="pre_view_version_id", field_type=LongType(), required=False),
+)
+
+
+def _v1_to_v2_reset_baseline(catalog: Catalog, namespace: str) -> None:
+    from cambrian.sidecar.selfmigrate import _write_version
+
+    table = catalog.load_table((namespace, TABLE_STATES_TABLE))
+    missing = [f for f in TABLE_STATES_V2_FIELDS if f.name not in table.schema().column_names]
+    if missing:
+        with table.update_schema() as update:
+            for f in missing:
+                update.add_column(f.name, f.field_type, required=False)
+    _write_version(catalog, namespace, 2)
+
+
+SELF_MIGRATIONS = [_v0_to_v1_initial, _v1_to_v2_reset_baseline]
 
 # Invariant: CAMBRIAN_SIDECAR_VERSION == len(SELF_MIGRATIONS).
 CAMBRIAN_SIDECAR_VERSION: int = len(SELF_MIGRATIONS)

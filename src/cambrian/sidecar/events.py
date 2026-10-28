@@ -18,6 +18,7 @@ unrecoverable for rollback.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -63,6 +64,9 @@ class TableStateRow:
     post_spec_id: int | None = None
     post_sort_order_id: int | None = None
     tag_ref: str | None = None
+    object_kind: str = "table"
+    pre_properties: dict[str, str] | None = None
+    pre_view_version_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +143,9 @@ _TABLE_STATES_PA_SCHEMA = pa.schema(
         pa.field("post_spec_id", pa.int64(), nullable=True),
         pa.field("post_sort_order_id", pa.int64(), nullable=True),
         pa.field("tag_ref", pa.string(), nullable=True),
+        pa.field("object_kind", pa.string(), nullable=True),
+        pa.field("pre_properties", pa.string(), nullable=True),
+        pa.field("pre_view_version_id", pa.int64(), nullable=True),
     ]
 )
 
@@ -237,6 +244,12 @@ def _table_states_to_arrow(event: _PendingEvent) -> pa.Table:
             "post_spec_id": pa.array([r.post_spec_id for r in rows], type=pa.int64()),
             "post_sort_order_id": pa.array([r.post_sort_order_id for r in rows], type=pa.int64()),
             "tag_ref": pa.array([r.tag_ref for r in rows], type=pa.string()),
+            "object_kind": pa.array([r.object_kind for r in rows], type=pa.string()),
+            "pre_properties": pa.array(
+                [None if r.pre_properties is None else json.dumps(r.pre_properties) for r in rows],
+                type=pa.string(),
+            ),
+            "pre_view_version_id": pa.array([r.pre_view_version_id for r in rows], type=pa.int64()),
         },
         schema=_TABLE_STATES_PA_SCHEMA,
     )
@@ -265,29 +278,37 @@ def latest_event(
     needs the most-recent ``apply`` for ``evolution_id="current"`` to know
     what's "in flight" in dev mode.
     """
-    arrow = _scan_events(catalog, namespace)
-    if arrow.num_rows == 0:
-        return None
+    matching = events(catalog, namespace, event_type=event_type, evolution_id=evolution_id)
+    return matching[-1] if matching else None
 
-    rows = arrow.to_pylist()
+
+def events(
+    catalog: Catalog,
+    namespace: str,
+    *,
+    event_type: EventType | None = None,
+    evolution_id: str | None = None,
+) -> list[Event]:
+    """Every event matching the optional filters, oldest first."""
+    arrow = _scan_events(catalog, namespace)
+    rows = arrow.to_pylist() if arrow.num_rows else []
     if event_type is not None:
         rows = [r for r in rows if r["event_type"] == event_type]
     if evolution_id is not None:
         rows = [r for r in rows if r["evolution_id"] == evolution_id]
-    if not rows:
-        return None
-
-    latest = max(rows, key=lambda r: r["event_ts"])
-    return Event(
-        event_id=latest["event_id"],
-        event_ts=latest["event_ts"],
-        event_type=latest["event_type"],
-        evolution_id=latest["evolution_id"],
-        evolution_hash=latest["evolution_hash"],
-        evolution_sql=latest["evolution_sql"],
-        actor=latest["actor"],
-        notes=latest["notes"],
-    )
+    return [
+        Event(
+            event_id=r["event_id"],
+            event_ts=r["event_ts"],
+            event_type=r["event_type"],
+            evolution_id=r["evolution_id"],
+            evolution_hash=r["evolution_hash"],
+            evolution_sql=r["evolution_sql"],
+            actor=r["actor"],
+            notes=r["notes"],
+        )
+        for r in sorted(rows, key=lambda r: r["event_ts"])
+    ]
 
 
 def committed_evolutions(catalog: Catalog, namespace: str) -> list[CommittedEvolution]:
@@ -420,6 +441,9 @@ def table_states_for_event(
             post_spec_id=r["post_spec_id"],
             post_sort_order_id=r["post_sort_order_id"],
             tag_ref=r["tag_ref"],
+            object_kind=r.get("object_kind") or "table",
+            pre_properties=json.loads(r["pre_properties"]) if r.get("pre_properties") else None,
+            pre_view_version_id=r.get("pre_view_version_id"),
         )
         for r in rows
     ]

@@ -15,7 +15,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import IntegerType, LongType, NestedField, StringType
 
-from cambrian.errors import ExternalWriteDetectedError, IllegalStateError
+from cambrian.errors import ExternalWriteDetectedError
 from cambrian.iceberg import Checkpoint, capture, pin, restore_pointers
 
 
@@ -198,10 +198,8 @@ def test_restore_refuses_concurrent_external_write(ns: str, rest_catalog: RestCa
     assert err.observed_snapshot_id == current_snap.snapshot_id
 
 
-def test_restore_refuses_when_checkpoint_predates_appends(
-    ns: str, rest_catalog: RestCatalog
-) -> None:
-    """The asymmetric "captured before snapshot, now has snapshot" case raises IllegalStateError."""
+def test_restore_to_before_any_append_empties_the_table(ns: str, rest_catalog: RestCatalog) -> None:
+    """A checkpoint from before any append restores "no current snapshot"."""
     table_id = (ns, "asymmetric")
     table = rest_catalog.create_table(identifier=table_id, schema=_initial_schema())
     cp = capture(table)
@@ -212,15 +210,17 @@ def test_restore_refuses_when_checkpoint_predates_appends(
     current_snap = table.current_snapshot()
     assert current_snap is not None
 
-    with pytest.raises(IllegalStateError):
-        restore_pointers(
-            table,
-            target_snapshot_id=cp.snapshot_id,
-            target_schema_id=cp.schema_id,
-            target_spec_id=cp.spec_id,
-            target_sort_order_id=cp.sort_order_id,
-            expected_current_snapshot_id=current_snap.snapshot_id,
-        )
+    restore_pointers(
+        table,
+        target_snapshot_id=cp.snapshot_id,
+        target_schema_id=cp.schema_id,
+        target_spec_id=cp.spec_id,
+        target_sort_order_id=cp.sort_order_id,
+        expected_current_snapshot_id=current_snap.snapshot_id,
+    )
+    table = rest_catalog.load_table(table_id)
+    assert table.current_snapshot() is None
+    assert table.scan().to_arrow().num_rows == 0
 
 
 def test_pin_creates_tag(ns: str, rest_catalog: RestCatalog) -> None:

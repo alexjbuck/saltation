@@ -31,6 +31,7 @@ __all__ = [
     "rename_view",
     "replace_view",
     "require_rest",
+    "set_current_version",
     "update_view_properties",
 ]
 
@@ -66,21 +67,40 @@ def replace_view(
         schema_json = json.loads(fresh.model_dump_json(by_alias=True))
         schema_json["schema-id"] = max(s.schema_id for s in meta.schemas) + 1
         updates.append({"action": "add-schema", "schema": schema_json})
-    version = {
-        "version-id": max(v.version_id for v in meta.versions) + 1,
-        "schema-id": -1 if existing is None else existing.schema_id,
-        "timestamp-ms": int(time.time() * 1000),
-        "summary": VIEW_SUMMARY,
-        "representations": [
-            {"type": "sql", "sql": sql, "dialect": dialect}
-            for dialect, sql in representations.items()
-        ],
-        "default-namespace": list(default_namespace),
-    }
-    updates += [
-        {"action": "add-view-version", "view-version": version},
-        {"action": "set-current-view-version", "view-version-id": -1},
-    ]
+    previous = None
+    if existing is not None:
+        previous = next(
+            (
+                v
+                for v in meta.versions
+                if v.schema_id == existing.schema_id
+                and list(v.default_namespace) == list(default_namespace)
+                and {r.root.dialect: r.root.sql for r in v.representations} == representations
+            ),
+            None,
+        )
+    if previous is not None:
+        # Re-adding an identical version is deduped to the old one, and
+        # Lakekeeper then fails to log it (#31); point at it instead.
+        updates.append(
+            {"action": "set-current-view-version", "view-version-id": previous.version_id}
+        )
+    else:
+        version = {
+            "version-id": max(v.version_id for v in meta.versions) + 1,
+            "schema-id": -1 if existing is None else existing.schema_id,
+            "timestamp-ms": int(time.time() * 1000),
+            "summary": VIEW_SUMMARY,
+            "representations": [
+                {"type": "sql", "sql": sql, "dialect": dialect}
+                for dialect, sql in representations.items()
+            ],
+            "default-namespace": list(default_namespace),
+        }
+        updates += [
+            {"action": "add-view-version", "view-version": version},
+            {"action": "set-current-view-version", "view-version-id": -1},
+        ]
     if properties:
         updates.append({"action": "set-properties", "updates": properties})
     _commit(catalog, view, updates)
@@ -96,6 +116,10 @@ def update_view_properties(
         updates.append({"action": "remove-properties", "removals": remove})
     if updates:
         _commit(catalog, view, updates)
+
+
+def set_current_version(catalog: RestCatalog, view: View, version_id: int) -> None:
+    _commit(catalog, view, [{"action": "set-current-view-version", "view-version-id": version_id}])
 
 
 def rename_view(catalog: RestCatalog, source: Identifier, target: Identifier) -> None:

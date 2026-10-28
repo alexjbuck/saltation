@@ -37,6 +37,7 @@ __all__ = [
     "TableIdent",
     "affected_tables",
     "affected_tables_with_overrides",
+    "affected_views",
     "parse_override_comment",
 ]
 
@@ -137,7 +138,7 @@ def affected_tables(statement: exp.Expression) -> list[TableIdent]:
     if isinstance(statement, exp.Alter):
         table = statement.args.get("this")
         if isinstance(table, exp.Table):
-            return [_from_table_node(table)]
+            return [_from_table_node(table), *_rename_targets(statement, table)]
         return []
 
     if isinstance(statement, exp.Insert):
@@ -147,6 +148,31 @@ def affected_tables(statement: exp.Expression) -> list[TableIdent]:
         return []
 
     return []
+
+
+def affected_views(statement: exp.Expression) -> list[TableIdent]:
+    """The views a ``CREATE/ALTER/DROP VIEW`` touches (both names for a rename)."""
+    if not isinstance(statement, exp.Create | exp.Drop | exp.Alter) or _kind(statement) != "VIEW":
+        return []
+    node = statement.args.get("this")
+    if isinstance(node, exp.Schema):
+        node = node.args.get("this")
+    if not isinstance(node, exp.Table):
+        return []
+    targets = _rename_targets(statement, node) if isinstance(statement, exp.Alter) else []
+    return [_from_table_node(node), *targets]
+
+
+def _rename_targets(statement: exp.Alter, source: exp.Table) -> list[TableIdent]:
+    out: list[TableIdent] = []
+    for action in statement.args.get("actions") or []:
+        target = action.args.get("this") if isinstance(action, exp.AlterRename) else None
+        if isinstance(target, exp.Table):
+            ident = _from_table_node(target)
+            if ident.namespace is None:
+                ident = TableIdent(namespace=_from_table_node(source).namespace, name=ident.name)
+            out.append(ident)
+    return out
 
 
 def _kind(node: exp.Expression) -> str:

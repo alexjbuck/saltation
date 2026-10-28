@@ -8,7 +8,7 @@
 #   bootstrap    - one-shot: waits for GET /iceberg/v1/config, exits 0
 #
 # Version pins (chosen 2026-10-28):
-#   rustfs/rustfs:1.0.0-beta.4            - same as the Lakekeeper rig
+#   rustfs/rustfs:1.0.4            - same as the Lakekeeper rig
 #   apache/gravitino-iceberg-rest:1.3.1   - latest stable (tag v1.3.1,
 #                                           image pushed 2026-09-30).
 #                                           NOTE: Docker Hub ``latest``
@@ -20,7 +20,7 @@ name: cambrian-test-gravitino
 
 services:
   rustfs:
-    image: rustfs/rustfs:1.0.0-beta.4
+    image: rustfs/rustfs:1.0.4
     environment:
       RUSTFS_ACCESS_KEY: cambrian-access-key
       RUSTFS_SECRET_KEY: cambrian-secret-key

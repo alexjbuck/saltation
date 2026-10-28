@@ -398,3 +398,131 @@ class CambrianSpark(Spark):
                     )
             self._retreat(index)
             return super()._parse_alter()
+
+    class Generator(Spark.Generator):
+        # Renders every cambrian extension back to SQL the parser above reads
+        # into the same AST, so the SQL recorded in events and --json output
+        # is the statement that ran.
+
+        TRANSFORMS: t.ClassVar[dict[type[exp.Expr], t.Callable[..., str]]] = {
+            **Spark.Generator.TRANSFORMS,
+            **{
+                node: lambda self, e: getattr(self, f"{type(e).__name__.lower()}_sql")(e)
+                for node in (
+                    AddPartitionField,
+                    AlterColumnPosition,
+                    AlterNamespaceProperties,
+                    DropIdentifierFields,
+                    DropPartitionField,
+                    ReplacePartitionField,
+                    SetIdentifierFields,
+                    UnsetTblProperties,
+                    WriteDistribution,
+                    WriteOrderedBy,
+                )
+            },
+        }
+
+        # Spark has no TIME type and maps it to TIMESTAMP; Iceberg v3 does.
+        TYPE_MAPPING: t.ClassVar[dict[exp.DType, str]] = {
+            **Spark.Generator.TYPE_MAPPING,
+            exp.DType.TIME: "TIME",
+        }
+
+        def trunc_sql(self, expression: exp.Trunc) -> str:
+            # truncate(W, col) parses into Trunc with the column as decimals.
+            column = expression.args.get("decimals")
+            if isinstance(column, exp.Column | exp.Identifier):
+                return f"TRUNCATE({self.sql(expression, 'this')}, {self.sql(column)})"
+            return super().trunc_sql(expression)
+
+        def cast_sql(self, expression: exp.Cast, safe_prefix: str | None = None) -> str:
+            # The date(col) partition transform parses into a Cast; written
+            # back as CAST, Spark would read it as TryCast.
+            to = expression.args.get("to")
+            in_partition = expression.find_ancestor(exp.PartitionedByProperty) is not None
+            if in_partition and isinstance(to, exp.DataType) and to.is_type(exp.DType.DATE):
+                return f"DATE({self.sql(expression, 'this')})"
+            return super().cast_sql(expression, safe_prefix=safe_prefix)
+
+        def altercolumn_sql(self, expression: exp.AlterColumn) -> str:
+            parts = [f"ALTER COLUMN {self._path(expression.this)}"]
+            if expression.args.get("dtype") is not None:
+                parts.append(f"TYPE {self.sql(expression, 'dtype')}")
+            if expression.args.get("comment") is not None:
+                parts.append(f"COMMENT {self.sql(expression, 'comment')}")
+            allow_null = expression.args.get("allow_null")
+            if allow_null is False:
+                parts.append("SET NOT NULL")
+            elif allow_null is True:
+                parts.append("DROP NOT NULL")
+            if expression.args.get("default") is not None:
+                parts.append(f"SET DEFAULT {self.sql(expression, 'default')}")
+            elif expression.args.get("drop") and allow_null is not True:
+                parts.append("DROP DEFAULT")
+            return " ".join(parts)
+
+        def altercolumnposition_sql(self, expression: AlterColumnPosition) -> str:
+            sql = f"ALTER COLUMN {self._path(expression.this)} {expression.args['position']}"
+            if expression.args.get("after") is not None:
+                sql += f" {self.sql(expression, 'after')}"
+            return sql
+
+        def create_sql(self, expression: exp.Create) -> str:
+            if (expression.args.get("kind") or "").upper() != "NAMESPACE":
+                return super().create_sql(expression)
+            exists = " IF NOT EXISTS" if expression.args.get("exists") else ""
+            sql = f"CREATE NAMESPACE{exists} {self.sql(expression, 'this')}"
+            props = expression.args.get("properties")
+            if props is not None and props.expressions:
+                sql += f" WITH PROPERTIES ({self._pairs(props.expressions)})"
+            return sql
+
+        def alternamespaceproperties_sql(self, expression: AlterNamespaceProperties) -> str:
+            name = self.sql(expression, "this")
+            return f"ALTER NAMESPACE {name} SET PROPERTIES ({self._pairs(expression.expressions)})"
+
+        def addpartitionfield_sql(self, expression: AddPartitionField) -> str:
+            return f"ADD PARTITION FIELD {self._partition_payload(expression)}"
+
+        def droppartitionfield_sql(self, expression: DropPartitionField) -> str:
+            return f"DROP PARTITION FIELD {self._partition_payload(expression)}"
+
+        def replacepartitionfield_sql(self, expression: ReplacePartitionField) -> str:
+            new = self._partition_payload(expression, payload="transform")
+            return f"REPLACE PARTITION FIELD {self.sql(expression, 'this')} WITH {new}"
+
+        def writeorderedby_sql(self, expression: WriteOrderedBy) -> str:
+            return f"WRITE ORDERED BY {self.expressions(expression, flat=True)}"
+
+        def writedistribution_sql(self, expression: WriteDistribution) -> str:
+            mode = expression.args.get("mode")
+            if mode == "none":
+                return "WRITE UNORDERED"
+            sql = "WRITE DISTRIBUTED BY PARTITION" if mode == "hash" else "WRITE"
+            if expression.expressions:
+                sql += f" LOCALLY ORDERED BY {self.expressions(expression, flat=True)}"
+            return sql
+
+        def unsettblproperties_sql(self, expression: UnsetTblProperties) -> str:
+            return f"UNSET TBLPROPERTIES ({self.expressions(expression, flat=True)})"
+
+        def setidentifierfields_sql(self, expression: SetIdentifierFields) -> str:
+            return f"SET IDENTIFIER FIELDS {self.expressions(expression, flat=True)}"
+
+        def dropidentifierfields_sql(self, expression: DropIdentifierFields) -> str:
+            return f"DROP IDENTIFIER FIELDS {self.expressions(expression, flat=True)}"
+
+        def _path(self, name: exp.Expr) -> str:
+            # Nested column paths are carried as one dotted identifier.
+            return ".".join(self.sql(exp.to_identifier(p)) for p in name.name.split("."))
+
+        def _pairs(self, properties: list[exp.Expr]) -> str:
+            return ", ".join(f"{self.sql(p, 'this')} = {self.sql(p, 'value')}" for p in properties)
+
+        def _partition_payload(self, expression: exp.Expr, payload: str = "") -> str:
+            node = expression.args.get(payload or "transform") or expression.args.get("this")
+            sql = self.sql(node)
+            if expression.args.get("alias") is not None:
+                sql += f" AS {self.sql(expression, 'alias')}"
+            return sql

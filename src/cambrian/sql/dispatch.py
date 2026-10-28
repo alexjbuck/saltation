@@ -1394,6 +1394,7 @@ def _dispatch_insert(catalog: Catalog, stmt: exp.Insert) -> DispatchResult:
         raise DispatchError(f"INSERT missing table identifier: {stmt.sql()}")
     identifier = _table_identifier(table_node)
     table = catalog.load_table(identifier)
+    _require_writable(table, stmt)
     arrow = _values_to_arrow(expression, table)
     table.append(arrow)
     n_rows = arrow.num_rows
@@ -1409,6 +1410,7 @@ def _dispatch_delete(catalog: Catalog, stmt: exp.Delete) -> DispatchResult:
         raise DispatchError(f"DELETE missing table identifier: {stmt.sql()}")
     identifier = _table_identifier(table_node)
     table = catalog.load_table(identifier)
+    _require_writable(table, stmt)
     where = stmt.args.get("where")
     if where is not None:
         # PyIceberg parses a string row filter itself; render the WHERE
@@ -1426,6 +1428,23 @@ def _dispatch_delete(catalog: Catalog, stmt: exp.Delete) -> DispatchResult:
         base = f"delete all rows from {'.'.join(identifier)}"
         notes = base if matched else f"{base}: matched no rows (idempotent)"
     return DispatchResult(affected_tables=affected_tables(stmt), notes=notes)
+
+
+def _require_writable(table: Table, stmt: exp.Expression) -> None:
+    if table.format_version >= 3:
+        raise UnsupportedStatementError(
+            statement_sql=stmt.sql(),
+            reason="PyIceberg 0.12 can't write data files to format v3 tables yet",
+        )
+    sources = [f.source_id for f in table.spec().fields]
+    if len(sources) != len(set(sources)):
+        raise UnsupportedStatementError(
+            statement_sql=stmt.sql(),
+            reason=(
+                "PyIceberg 0.12 can't write to a table partitioned more than once on the "
+                "same column (#32)"
+            ),
+        )
 
 
 def _delete(table: Table, *, delete_filter: str | None = None) -> bool:

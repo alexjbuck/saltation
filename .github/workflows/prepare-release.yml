@@ -1,0 +1,56 @@
+name: prepare-release
+
+# Every push to main turns the pending .changeset/ files into a version bump
+# and CHANGELOG entry on the `release` branch, and opens (or refreshes) the
+# release PR. Merging it runs release.yml. See docs/releasing.md.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    # The release PR's own merge has nothing left to release.
+    if: "!contains(github.event.head_commit.message, 'chore: prepare release')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          # A PR opened with the default token doesn't trigger CI on itself.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Pending changesets?
+        id: pending
+        run: |
+          if compgen -G ".changeset/*.md" > /dev/null; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No .changeset/*.md files; nothing to release."
+          fi
+
+      - name: Install uv
+        if: steps.pending.outputs.any
+        uses: astral-sh/setup-uv@v6
+
+      - uses: knope-dev/action@v2.1.2
+        if: steps.pending.outputs.any
+        with:
+          version: 0.23.2
+
+      - name: Open or refresh the release PR
+        if: steps.pending.outputs.any
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          knope prepare-release --verbose

@@ -1,0 +1,29 @@
+name: changeset
+
+# Release notes are written per PR as .changeset/*.md files (knope
+# document-change). A PR with nothing user-facing takes the no-changeset label.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  changeset:
+    if: github.head_ref != 'release' && !contains(github.event.pull_request.labels.*.name, 'no-changeset')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Require a change file
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! git diff --name-only --diff-filter=AM "$BASE"...HEAD -- '.changeset/*.md' | grep -q .; then
+            echo "::error::Add a change file with 'knope document-change' (or a .changeset/*.md by hand), or label the PR no-changeset."
+            exit 1
+          fi

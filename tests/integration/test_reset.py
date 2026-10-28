@@ -22,7 +22,7 @@ from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
 from cambrian.config import CambrianConfig, DevConfig, EvolutionsConfig
-from cambrian.errors import ExternalWriteDetectedError
+from cambrian.errors import ExternalWriteDetectedError, IllegalStateError
 from cambrian.migrate.runner import (
     CURRENT_EVOLUTION_ID,
     apply_idempotent,
@@ -73,71 +73,82 @@ def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
 def test_reset_roundtrip(
     rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
 ) -> None:
-    """Reset path: apply idempotently, then mutate current.sql with reset → rolls back + re-applies.
+    """Each reset lands on the committed state plus the latest current.sql.
 
-    Reset rolls back tables to the state captured at the start of the
-    *previous* reset. For tables that didn't exist at the previous reset
-    (i.e. created by the apply itself), the 4-pointer primitive can't
-    restore them to non-existence; reset only restores tables that
-    existed before the previous reset cycle. That's the documented
-    semantic of M4's restore_pointers.
+    Nothing here is committed, so the table belongs to current.sql: every
+    reset drops it and runs the new text, and rows from earlier versions of
+    the file (applied idempotently or by reset) don't survive.
     """
     del rest_catalog
     evolutions = tmp_path / "evolutions"
     current = evolutions / "current.sql"
-
-    # Bootstrap the table and insert one row idempotently so the table
-    # has a snapshot *before* the first reset captures its pre-state.
-    # (The 4-pointer rollback primitive can't restore "no snapshot" if
-    # there's now a snapshot — that's M4's IllegalStateError guard. The
-    # reset semantic requires the table to be in a fully-formed state
-    # at the start of the reset cycle.)
-    _write(
-        current,
-        (
-            f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
-            f"INSERT INTO {ns}.t VALUES (0, 'seed');\n"
-        ),
-    )
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
-    apply_idempotent(cfg)
 
-    # Switch to reset mode: current.sql now only declares alice (no seed
-    # INSERT). The seed remains in the table because it was applied
-    # idempotently in the pre-reset bootstrap; reset operates on the
-    # table state, not on the SQL text.
-    _write(
-        current,
-        (
+    def names() -> list[str]:
+        rows = _verify_catalog().load_table((ns, "t")).scan().to_arrow().to_pylist()
+        return sorted(r["name"] for r in rows)
+
+    def version(name: str) -> str:
+        return (
             f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
-            f"INSERT INTO {ns}.t VALUES (1, 'alice');\n"
-        ),
-    )
+            f"INSERT INTO {ns}.t VALUES (1, '{name}');\n"
+        )
+
+    _write(current, version("seed"))
+    apply_idempotent(cfg)
+    assert names() == ["seed"]
+
+    _write(current, version("alice"))
     r1 = apply_reset(cfg)
     assert r1.status == "applied"
+    assert names() == ["alice"]
 
-    verify = _verify_catalog()
-    rows = verify.load_table((ns, "t")).scan().to_arrow().to_pylist()
-    # seed (from idempotent bootstrap) + alice (from reset r1)
-    assert sorted(r["name"] for r in rows) == ["alice", "seed"]
-
-    # Second reset: current.sql replaces alice's INSERT with bob's.
-    # Reset rolls the table back to pre-r1 (just seed), then re-applies
-    # → only bob got appended this cycle. Final state: seed + bob.
-    _write(
-        current,
-        (
-            f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
-            f"INSERT INTO {ns}.t VALUES (2, 'bob');\n"
-        ),
-    )
+    _write(current, version("bob"))
     r2 = apply_reset(cfg)
     assert r2.status == "applied", r2
     assert any(rb.rolled_back for rb in r2.rollbacks), r2.rollbacks
+    assert names() == ["bob"]
 
-    verify = _verify_catalog()
-    rows = verify.load_table((ns, "t")).scan().to_arrow().to_pylist()
-    assert sorted(r["name"] for r in rows) == ["bob", "seed"]
+
+def test_reset_empties_a_committed_empty_table(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    for i in (1, 2):
+        _write(current, f"INSERT INTO {ns}.t VALUES ({i});\n")
+        assert apply_reset(cfg).status == "applied"
+        rows = _verify_catalog().load_table((ns, "t")).scan().to_arrow().column("id")
+        assert rows.to_pylist() == [i]
+
+
+def test_reset_keeps_committed_rows(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    """A table that predates current.sql keeps its rows; only current.sql's go."""
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    rest_catalog.load_table((ns, "t")).append(pa.table({"id": [0]}))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    for i in (1, 2, 3):
+        _write(current, f"INSERT INTO {ns}.t VALUES ({i});\n")
+        assert apply_reset(cfg).status == "applied"
+        rows = _verify_catalog().load_table((ns, "t")).scan().to_arrow().column("id")
+        assert sorted(rows.to_pylist()) == [0, i]
+
+    assert rollback_to_last_checkpoint(cfg).status == "applied"
+    rows = _verify_catalog().load_table((ns, "t")).scan().to_arrow().column("id")
+    assert rows.to_pylist() == [0]
+
+    # Same text after a rollback must run again, not short-circuit.
+    assert apply_reset(cfg).status == "applied"
+    rows = _verify_catalog().load_table((ns, "t")).scan().to_arrow().column("id")
+    assert sorted(rows.to_pylist()) == [0, 3]
 
 
 def test_reset_external_write_refused_without_force(
@@ -385,3 +396,20 @@ def test_reset_with_view_in_script(
     assert result.status == "applied", result
     assert [f.name for f in rest_catalog.load_view((ns, "v")).schema().fields] == ["id", "name"]
     rest_catalog.drop_view((ns, "v"))
+
+
+def test_reset_refuses_to_undo_a_format_upgrade(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    _write(current, f"ALTER TABLE {ns}.t SET TBLPROPERTIES ('format-version' = '3');\n")
+    assert apply_reset(cfg).status == "applied"
+    _write(current, f"ALTER TABLE {ns}.t ADD COLUMN c INT;\n")
+    with pytest.raises(IllegalStateError, match="can't be downgraded"):
+        apply_reset(cfg)
+    # Refused before touching anything.
+    assert [f.name for f in rest_catalog.load_table((ns, "t")).schema().fields] == ["id"]

@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -234,7 +234,6 @@ def cambrian_commit(
         IllegalStateError: ``current.sql`` is empty, or the most recent apply
             event's hash doesn't match the file (commit on dirty state).
     """
-    from cambrian.migrate.runner import CURRENT_EVOLUTION_ID
 
     if not message.strip():
         raise IllegalStateError("commit message must be non-empty")
@@ -262,12 +261,12 @@ def cambrian_commit(
     )
     namespace = state.sidecar_namespace
 
-    last_apply = latest_event(
-        catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID
-    )
-    if last_apply is None or last_apply.evolution_hash != expanded.hash:
+    from cambrian.migrate.runner import _applied_and_standing
+
+    if not _applied_and_standing(catalog, namespace, expanded.hash):
         raise IllegalStateError(
-            "current.sql has not been applied (or has been edited since the last apply). "
+            "current.sql has not been applied (or has been edited or rolled back since the "
+            "last apply). "
             "Run `cambrian apply` first; commit is only safe on a clean idempotent state."
         )
 
@@ -286,44 +285,26 @@ def cambrian_commit(
     per_stmt_tables = affected_tables_with_overrides(expanded.text, statements)
     idents = _unique_tables(per_stmt_tables)
 
-    # Pull the pre-apply state from the most recent apply event for current —
-    # that's what an `uncommit` rolls back to. The post-apply state (live now)
-    # is what we pin under the tag.
-    prior_apply_states = {
-        row.table_ident: row
-        for row in table_states_for_event(catalog, namespace, event_id=last_apply.event_id)
-    }
+    # The commit records, for every object this dev cycle touched, how it
+    # stood before current.sql (what uncommit restores) and, for tables, the
+    # state pinned under the tag now (what reset --to restores).
+    from cambrian.migrate.runner import _load_baseline
 
-    # 1. Capture + pin checkpoints before moving the file. If pinning fails
-    # we want the working tree intact so the user can retry without manually
-    # restoring current.sql.
+    baseline = _load_baseline(catalog, namespace)
     tag_name = new_file.tag_ref()
     table_states: list[TableStateRow] = []
-    for ident in idents:
-        ident_tuple = _ident_to_tuple(ident)
-        try:
-            table = catalog.load_table(ident_tuple)
-        except Exception:
-            table_states.append(
-                TableStateRow(
-                    table_ident=str(ident),
-                    tag_ref=None,
-                )
-            )
+    for (kind, ident_str), before in baseline.items():
+        table = None
+        if kind == "table" and catalog.table_exists(_ident_str_to_tuple(ident_str)):
+            table = catalog.load_table(_ident_str_to_tuple(ident_str))
+        if table is None:
+            table_states.append(before)
             continue
         cp = capture(table)
         pin(table, tag_name=tag_name, snapshot_id=cp.snapshot_id)
-        prior = prior_apply_states.get(str(ident))
-        # pre_* mirrors the apply event's pre_* (rollback target on uncommit);
-        # post_* is the freshly captured state (the tag's snapshot).
         table_states.append(
-            TableStateRow(
-                table_ident=str(ident),
-                pre_snapshot_id=prior.pre_snapshot_id if prior is not None else None,
-                pre_schema_id=prior.pre_schema_id if prior is not None else None,
-                pre_spec_id=prior.pre_spec_id if prior is not None else None,
-                pre_sort_order_id=prior.pre_sort_order_id if prior is not None else None,
-                pre_metadata_loc=prior.pre_metadata_loc if prior is not None else None,
+            replace(
+                before,
                 post_snapshot_id=cp.snapshot_id,
                 post_schema_id=cp.schema_id,
                 post_spec_id=cp.spec_id,
@@ -433,23 +414,13 @@ def cambrian_uncommit(
     committed_text = latest_file.path.read_text(encoding="utf-8")
     current_path.write_text(committed_text, encoding="utf-8")
 
+    from cambrian.migrate.runner import _restore_baseline
+
     rows = table_states_for_event(catalog, namespace, event_id=commit_event.event_id)
-    rolled_back: list[str] = []
-    skipped: list[str] = []
-    rollback_states: list[TableStateRow] = []
-    for row in rows:
-        outcome = _rollback_to_row(catalog, row)
-        if outcome is None:
-            skipped.append(row.table_ident)
-            rollback_states.append(
-                TableStateRow(
-                    table_ident=row.table_ident,
-                    tag_ref=row.tag_ref,
-                )
-            )
-            continue
-        rolled_back.append(row.table_ident)
-        rollback_states.append(outcome)
+    rollbacks = _restore_baseline(catalog, {(r.object_kind, r.table_ident): r for r in rows})
+    rolled_back = [r.ident for r in rollbacks]
+    skipped = sorted({r.table_ident for r in rows} - set(rolled_back))
+    rollback_states = rows
 
     latest_file.path.unlink()
 

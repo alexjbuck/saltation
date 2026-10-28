@@ -19,7 +19,7 @@ from pyiceberg.catalog.rest import RestCatalog
 from typer.testing import CliRunner
 
 from cambrian.cli import EXIT_NOT_INITIALIZED, EXIT_VERSION_AHEAD, app
-from cambrian.sidecar.schema import VERSION_TABLE
+from cambrian.sidecar.schema import CAMBRIAN_SIDECAR_VERSION, VERSION_TABLE
 from tests.integration.conftest import (
     _drop_namespace_recursively,
 )
@@ -67,7 +67,7 @@ def test_init_fresh_then_status(config_path: Path, sidecar_ns: str) -> None:
     payload = json.loads(status_result.output)
     assert payload["initialized"] is True
     assert payload["sidecar_namespace"] == sidecar_ns
-    assert payload["sidecar_version"] == 1
+    assert payload["sidecar_version"] == CAMBRIAN_SIDECAR_VERSION
     assert payload["is_version_ahead"] is False
     assert payload["committed_count"] == 0
     assert payload["committed_evolutions"] == []
