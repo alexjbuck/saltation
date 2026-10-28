@@ -1,5 +1,5 @@
 ---
-default: major
+default: minor
 ---
 
 # Renamed from cambrian to saltation
