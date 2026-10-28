@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlglot import expressions as exp
 
-from cambrian.sql.script import SOURCE_DIALECT, SOURCE_SQL, parse_script
+from cambrian.errors import DispatchError
+from cambrian.sql.script import SOURCE_DIALECT, SOURCE_SQL, VIEW_BODIES, parse_script
 
 TRINO_BODY = (
     'SELECT _key AS device_id, ids[1] AS id FROM redpanda.default."devices.array.btr" '
@@ -51,3 +53,42 @@ def test_view_statements_without_a_body_parse_as_spark() -> None:
     script = "ALTER VIEW a.v SET TBLPROPERTIES ('k' = 'v'); DROP VIEW a.v;"
     stmts = parse_script(script, view_source_dialect="trino")
     assert [type(s).__name__ for s in stmts] == ["Alter", "Drop"]
+
+
+def test_dialect_clauses_give_one_verbatim_body_each() -> None:
+    script = (
+        "CREATE OR REPLACE VIEW a.v (id STRING) COMMENT 'docs'\n"
+        f"  DIALECT trino AS $$ {TRINO_BODY} $$\n"
+        "  DIALECT spark AS $$SELECT `x` AS id FROM a.t WHERE s = 'a;b'$$;\n"
+        "DROP VIEW a.w;"
+    )
+    view, drop = parse_script(script)
+    assert isinstance(drop, exp.Drop)
+    bodies = view.meta[VIEW_BODIES]
+    assert [(b.meta[SOURCE_DIALECT], b.meta[SOURCE_SQL]) for b in bodies] == [
+        ("trino", TRINO_BODY),
+        ("spark", "SELECT `x` AS id FROM a.t WHERE s = 'a;b'"),
+    ]
+    assert view.expression is bodies[0]
+    assert view.args.get("replace") is True
+
+
+def test_dialect_clause_on_alter_view() -> None:
+    (stmt,) = parse_script(f"ALTER VIEW a.v DIALECT trino AS $${TRINO_BODY}$$")
+    assert isinstance(stmt, exp.Alter)
+    assert [b.meta[SOURCE_DIALECT] for b in stmt.meta[VIEW_BODIES]] == ["trino"]
+
+
+def test_duplicate_dialect_is_refused() -> None:
+    with pytest.raises(DispatchError, match="more than one body"):
+        parse_script("CREATE VIEW a.v DIALECT trino AS $$SELECT 1$$ DIALECT TRINO AS $$SELECT 2$$")
+
+
+def test_unknown_dialect_is_refused() -> None:
+    with pytest.raises(DispatchError, match="unknown view dialect"):
+        parse_script("CREATE VIEW a.v DIALECT nope AS $$SELECT 1$$")
+
+
+def test_dialect_without_heredoc_body_is_refused() -> None:
+    with pytest.raises(DispatchError, match=r"DIALECT <name> AS \$\$"):
+        parse_script("CREATE VIEW a.v DIALECT trino AS SELECT 1")

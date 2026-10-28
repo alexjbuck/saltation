@@ -51,3 +51,9 @@ dialects = ["spark"]
 # Columns cambrian can't type from the catalog take a type in the view's
 # column list: CREATE VIEW v (id STRING, ts TIMESTAMP) AS <body>.
 # source_dialect = "trino"
+#
+# A view can also carry a hand-written body per engine; those are stored
+# verbatim and only the configured dialects without one are transpiled:
+#   CREATE OR REPLACE VIEW v (id STRING)
+#     DIALECT trino AS $$ SELECT ... $$
+#     DIALECT spark AS $$ SELECT ... $$;

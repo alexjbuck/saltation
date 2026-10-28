@@ -125,6 +125,11 @@ class CambrianSpark(Spark):
     ``sqlglot.parse(sql, dialect=CambrianSpark())``.
     """
 
+    class Tokenizer(Spark.Tokenizer):
+        # ``$$ ... $$`` delimits a verbatim view body in
+        # ``CREATE VIEW ... DIALECT <name> AS $$ ... $$``.
+        HEREDOC_STRINGS: t.ClassVar[list[str | tuple[str, str]]] = ["$"]
+
     class Parser(SparkParser):
         # Two ALTER_PARSERS entries don't exist in stock Spark: WRITE (for
         # ``WRITE ORDERED BY``) and REPLACE (for ``REPLACE PARTITION FIELD``).

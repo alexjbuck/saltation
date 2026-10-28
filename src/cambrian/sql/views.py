@@ -53,7 +53,7 @@ from cambrian.sql.dispatch import (
     _scalar,
     _table_identifier,
 )
-from cambrian.sql.script import SOURCE_DIALECT, SOURCE_SQL
+from cambrian.sql.script import SOURCE_DIALECT, SOURCE_SQL, VIEW_BODIES
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -106,8 +106,9 @@ def _create_view(catalog: Catalog, stmt: exp.Create, dialects: Sequence[str]) ->
     ident = _table_identifier(target)
     name = ".".join(ident)
     props = _view_properties(stmt.args.get("properties"))
-    schema = _infer_schema(catalog, query, ident[:-1], columns)
-    sqls = _representations(query, dialects)
+    bodies = stmt.meta.get(VIEW_BODIES) or [query]
+    schema = _infer_schema(catalog, bodies, ident[:-1], columns)
+    sqls = _representations(bodies, dialects)
 
     try:
         existing = rest.load_view(ident)
@@ -120,7 +121,7 @@ def _create_view(catalog: Catalog, stmt: exp.Create, dialects: Sequence[str]) ->
             return DispatchResult(notes=f"view {name} unchanged (idempotent)")
         replace_view(rest, existing, schema, sqls, ident[:-1], props)
         return DispatchResult(
-            notes=f"replaced view {name} (dialects {sorted(sqls)}){_untranslated(query, sqls)}"
+            notes=f"replaced view {name} (dialects {sorted(sqls)}){_untranslated(bodies, sqls)}"
         )
 
     version = ViewVersion.model_validate(
@@ -139,7 +140,7 @@ def _create_view(catalog: Catalog, stmt: exp.Create, dialects: Sequence[str]) ->
     except ViewAlreadyExistsError:
         return DispatchResult(notes=f"view {name} already exists (concurrent create)")
     return DispatchResult(
-        notes=f"created view {name} (dialects {sorted(sqls)}){_untranslated(query, sqls)}"
+        notes=f"created view {name} (dialects {sorted(sqls)}){_untranslated(bodies, sqls)}"
     )
 
 
@@ -169,8 +170,9 @@ def _alter_view(catalog: Catalog, stmt: exp.Alter, dialects: Sequence[str]) -> D
         if isinstance(action, exp.Query):
             # ALTER VIEW v AS <query>: a new version; schema and SQL change,
             # properties stay.
-            schema = _infer_schema(catalog, action, ident[:-1], [])
-            sqls = _representations(action, dialects)
+            bodies = stmt.meta.get(VIEW_BODIES) or [action]
+            schema = _infer_schema(catalog, bodies, ident[:-1], [])
+            sqls = _representations(bodies, dialects)
             if _matches(view, schema, sqls, {}):
                 notes.append("query unchanged (idempotent)")
             else:
@@ -219,24 +221,30 @@ def _view_properties(node: exp.Expression | None) -> dict[str, str]:
     return props
 
 
-def _untranslated(query: exp.Query, sqls: dict[str, str]) -> str:
+def _untranslated(bodies: list[exp.Query], sqls: dict[str, str]) -> str:
     """Warn about functions sqlglot doesn't know: they're copied unchanged into
     every transpiled dialect, which may not have them."""
-    targets = sorted(d for d in sqls if d != query.meta.get(SOURCE_DIALECT, "spark"))
-    unknown = sorted({f.name for f in query.find_all(exp.Anonymous)})
+    targets = sorted(set(sqls) - _explicit(bodies).keys())
+    unknown = sorted({f.name for f in bodies[0].find_all(exp.Anonymous)})
     if not targets or not unknown:
         return ""
     return (
         f"; WARNING: functions {unknown} copied untranslated into {targets} "
-        "(check those engines provide them)"
+        "(check those engines provide them, or give those dialects a DIALECT body)"
     )
 
 
-def _representations(query: exp.Query, dialects: Sequence[str]) -> dict[str, str]:
-    # The dialect the body was written in keeps its text verbatim; the others
-    # are transpiled from it.
-    source = query.meta.get(SOURCE_DIALECT)
-    return {d: query.meta[SOURCE_SQL] if d == source else query.sql(dialect=d) for d in dialects}
+def _explicit(bodies: list[exp.Query]) -> dict[str, str]:
+    return {q.meta[SOURCE_DIALECT]: q.meta[SOURCE_SQL] for q in bodies if SOURCE_SQL in q.meta}
+
+
+def _representations(bodies: list[exp.Query], dialects: Sequence[str]) -> dict[str, str]:
+    # Bodies written for a dialect are stored verbatim; configured dialects
+    # without one are transpiled from the first body.
+    sqls = _explicit(bodies)
+    for d in dialects:
+        sqls.setdefault(d, bodies[0].sql(dialect=d))
+    return sqls
 
 
 def _matches(view: View, schema: Schema, sqls: dict[str, str], props: dict[str, str]) -> bool:
@@ -260,36 +268,49 @@ def _shape(schema: Schema) -> list[tuple[str, str, bool, str | None]]:
 
 def _infer_schema(
     catalog: Catalog,
-    query: exp.Query,
+    bodies: list[exp.Query],
     default_namespace: Identifier,
     columns: list[exp.Expression],
 ) -> Schema:
-    if columns and len(columns) != len(query.selects):
-        raise DispatchError(
-            f"view column list has {len(columns)} names but the query returns "
-            f"{len(query.selects)} columns"
-        )
-    declared = [_declared_type(c) for c in columns] or [None] * len(query.selects)
-    inferred = _inferred_types(catalog, query, default_namespace) if None in declared else {}
+    width = len(columns) or len(bodies[0].selects)
+    for body in bodies:
+        if len(body.selects) != width:
+            raise DispatchError(
+                f"view {_label(body)} returns {len(body.selects)} columns, expected {width}"
+            )
+    declared = [_declared_type(c) for c in columns] or [None] * width
+    # Declared types win, so bodies only need inferring when a column has none.
+    inferred: list[dict[int, IcebergType]] = (
+        [_inferred_types(catalog, b, default_namespace) for b in bodies]
+        if None in declared
+        else [{} for _ in bodies]
+    )
     fields: list[NestedField] = []
-    for i, projection in enumerate(query.selects):
-        name = columns[i].name if columns else projection.alias_or_name
-        field_type = declared[i] or inferred.get(i)
+    for i in range(width):
+        name = columns[i].name if columns else bodies[0].selects[i].alias_or_name
+        found = {
+            _label(b): types[i] for b, types in zip(bodies, inferred, strict=True) if i in types
+        }
+        if len({str(t) for t in found.values()}) > 1:
+            detail = ", ".join(f"{k}: {v}" for k, v in found.items())
+            raise DispatchError(f"view bodies disagree on the type of column {name!r} ({detail})")
+        field_type = declared[i] or next(iter(found.values()), None)
         if field_type is None:
             raise DispatchError(
                 f"can't infer the type of view column {name!r} (it isn't read from an Iceberg "
                 "table or view in the catalog); CAST it in the query or give it a type in "
                 "the view's column list"
             )
-        doc = (
-            _column_comment(columns[i])
-            if columns and isinstance(columns[i], exp.ColumnDef)
-            else None
-        )
+        column = columns[i] if columns else None
+        doc = _column_comment(column) if isinstance(column, exp.ColumnDef) else None
         fields.append(
             NestedField(field_id=i + 1, name=name, field_type=field_type, required=False, doc=doc)
         )
     return Schema(*fields)
+
+
+def _label(body: exp.Query) -> str:
+    return f"{body.meta.get(SOURCE_DIALECT, 'spark')} body"
 
 
 def _declared_type(column: exp.Expression) -> IcebergType | None:
