@@ -81,8 +81,12 @@ async def _drive_watch(
     saw_apply = asyncio.Event()
     applies_remaining = {"n": expected_apply_events}
 
+    started = asyncio.Event()
+
     async def _on_event(event: WatchEvent) -> None:
         events.append(event)
+        if event.kind == "startup":
+            started.set()
         # Count any post-startup event tied to a real filesystem change,
         # including errors — the test cases assert on whichever outcomes
         # they expect.
@@ -105,6 +109,9 @@ async def _drive_watch(
     # Run actions in order, with a brief settle delay between each so the
     # filesystem-event pipeline can fire.
     try:
+        # Edits made before the watcher starts watching (it first runs the
+        # initial apply) are never seen; wait for its startup event.
+        await asyncio.wait_for(started.wait(), timeout=timeout_s)
         for act in actions:
             await act()
         await asyncio.wait_for(saw_apply.wait(), timeout=timeout_s)

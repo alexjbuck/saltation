@@ -27,7 +27,7 @@ from typing import Literal
 
 __all__ = ["CORPUS", "CorpusEntry", "negatives", "positives"]
 
-Expected = Literal["apply", "reject"]
+Expected = Literal["apply", "reject", "invalid"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,11 @@ class CorpusEntry:
 def positives() -> list[CorpusEntry]:
     """All in-scope entries (``expected == "apply"``)."""
     return [e for e in CORPUS if e.expected == "apply"]
+
+
+def invalids() -> list[CorpusEntry]:
+    """Valid syntax that Spark-Iceberg refuses as an evolution (``expected == "invalid"``)."""
+    return [e for e in CORPUS if e.expected == "invalid"]
 
 
 def negatives() -> list[CorpusEntry]:
@@ -396,8 +401,8 @@ CORPUS: list[CorpusEntry] = [
         "add_column_not_null",
         "schema_add",
         "ALTER TABLE foo.t ADD COLUMN c INT NOT NULL",
-        "apply",
-        "ADD COLUMN with NOT NULL.",
+        "invalid",
+        "Iceberg refuses a required column without a default (spec: Schema Evolution).",
     ),
     CorpusEntry(
         "add_column_first",
@@ -507,9 +512,9 @@ CORPUS: list[CorpusEntry] = [
     CorpusEntry(
         "alter_column_set_not_null",
         "schema_alter",
-        "ALTER TABLE foo.t ALTER COLUMN id SET NOT NULL",
-        "apply",
-        "SET NOT NULL (requirement tightening).",
+        "ALTER TABLE foo.t ALTER COLUMN name SET NOT NULL",
+        "invalid",
+        f"{_DDL}; SET NOT NULL is refused: Iceberg can't know existing rows are non-null.",
     ),
     CorpusEntry(
         "alter_column_drop_not_null",
@@ -763,6 +768,129 @@ CORPUS: list[CorpusEntry] = [
         "DELETE FROM foo.t WHERE category = 'x' AND id > 10",
         "apply",
         "DELETE with compound predicate.",
+    ),
+    # =====================================================================
+    # POSITIVE — forms surfaced by the spec audit (nested paths, write order
+    # semantics, location, CREATE ... LIKE, Spark-only transform aliases)
+    # =====================================================================
+    CorpusEntry(
+        "ct_struct_field_not_null_comment",
+        "create_table_nested",
+        "CREATE TABLE foo.t (s STRUCT<x: DOUBLE NOT NULL COMMENT 'xx', y: INT>) USING iceberg",
+        "apply",
+        "Struct field nullability and comment are part of the Spark struct type.",
+    ),
+    CorpusEntry(
+        "ct_char_varchar_small_ints",
+        "create_table",
+        "CREATE TABLE foo.t (a CHAR(3), b VARCHAR(10), c SMALLINT, d TINYINT) USING iceberg",
+        "apply",
+        "Spark-to-Iceberg type conversion: char/varchar -> string, byte/short -> int.",
+    ),
+    CorpusEntry(
+        "ct_part_date",
+        "create_table_partition",
+        "CREATE TABLE foo.t (ts TIMESTAMP) USING iceberg PARTITIONED BY (date(ts))",
+        "apply",
+        f"{_DDL}; date(ts) is the documented alias of day(ts).",
+    ),
+    CorpusEntry(
+        "ct_part_date_hour",
+        "create_table_partition",
+        "CREATE TABLE foo.t (ts TIMESTAMP) USING iceberg PARTITIONED BY (date_hour(ts))",
+        "apply",
+        f"{_DDL}; date_hour(ts) is the documented alias of hour(ts).",
+    ),
+    CorpusEntry(
+        "ct_part_nested",
+        "create_table_partition",
+        "CREATE TABLE foo.t (p STRUCT<x: INT>) USING iceberg PARTITIONED BY (bucket(4, p.x))",
+        "apply",
+        "Spec: partition sources may be nested in a struct.",
+    ),
+    CorpusEntry(
+        "ct_like",
+        "create_table",
+        "CREATE TABLE foo.t2 LIKE foo.t",
+        "apply",
+        f"{_DDL}; Spark 4.2 copies schema, partitioning, sort order and properties.",
+    ),
+    CorpusEntry(
+        "add_column_nested_first",
+        "schema_add",
+        "ALTER TABLE foo.t ADD COLUMN point.v DOUBLE FIRST",
+        "apply",
+        f"{_DDL}; nested add with position.",
+    ),
+    CorpusEntry(
+        "add_column_list_element",
+        "schema_add",
+        "ALTER TABLE foo.t ADD COLUMN pts.element.z DOUBLE",
+        "apply",
+        f"{_DDL}; 'element' addresses a list's element struct.",
+    ),
+    CorpusEntry(
+        "add_column_map_value",
+        "schema_add",
+        "ALTER TABLE foo.t ADD COLUMN m.value.b INT",
+        "apply",
+        f"{_DDL}; 'value' addresses a map's value struct.",
+    ),
+    CorpusEntry(
+        "alter_column_nested_comment",
+        "schema_alter",
+        "ALTER TABLE foo.t ALTER COLUMN point.x COMMENT 'xx'",
+        "apply",
+        "Comment on a struct field.",
+    ),
+    CorpusEntry(
+        "alter_column_nested_type",
+        "schema_alter",
+        "ALTER TABLE foo.t ALTER COLUMN m.value.a TYPE BIGINT",
+        "apply",
+        "Widen a field inside a map value struct.",
+    ),
+    CorpusEntry(
+        "alter_column_nested_after",
+        "schema_alter",
+        "ALTER TABLE foo.t ALTER COLUMN point.z AFTER x",
+        "apply",
+        f"{_DDL}; reorder within a struct.",
+    ),
+    CorpusEntry(
+        "apf_nested",
+        "partition_evolution",
+        "ALTER TABLE foo.t ADD PARTITION FIELD bucket(4, location.zone)",
+        "apply",
+        "Spec: partition sources may be nested in a struct.",
+    ),
+    CorpusEntry(
+        "wob_transform_days",
+        "sort_order",
+        "ALTER TABLE foo.t WRITE ORDERED BY days(ts) DESC, bucket(16, id)",
+        "apply",
+        "Sort fields take partition transforms (spec: Sorting).",
+    ),
+    CorpusEntry(
+        "set_location",
+        "table_properties",
+        "ALTER TABLE foo.t SET LOCATION 's3://bucket/moved'",
+        "apply",
+        "Spark ALTER TABLE ... SET LOCATION; REST SetLocationUpdate.",
+    ),
+    CorpusEntry(
+        "set_comment_property",
+        "table_properties",
+        "ALTER TABLE foo.t SET TBLPROPERTIES ('comment' = 'A table comment.')",
+        "apply",
+        f"{_DDL}; the table comment is the 'comment' property.",
+    ),
+    CorpusEntry(
+        "ns_create_comment",
+        "namespace",
+        "CREATE NAMESPACE foo COMMENT 'docs' WITH DBPROPERTIES ('owner' = 'eng')",
+        "apply",
+        "Spark CREATE NAMESPACE clauses; comment is stored as the 'comment' property.",
     ),
     # =====================================================================
     # NEGATIVE — out-of-scope writes

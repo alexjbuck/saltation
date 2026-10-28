@@ -1,17 +1,13 @@
-"""Oracle coverage test over the Iceberg SQL corpus.
+"""Parse-level oracle over the Iceberg SQL corpus.
 
-For every :data:`CORPUS` entry this asserts the *contract* end-to-end:
-
-* ``expected == "apply"``: the SQL parses with :class:`CambrianSpark` to a
-  real node (NOT a sqlglot ``Command`` fallback) AND :func:`dispatch` runs
-  against a mock catalog/table without raising.
+* ``expected`` in ``{"apply", "invalid"}``: the SQL parses with
+  :class:`CambrianSpark` to a real node, not a sqlglot ``Command`` fallback.
+  Whether it then does the right thing is proven against Lakekeeper by
+  ``tests/integration/test_corpus_effects.py``; a mock catalog accepts any
+  call, so "dispatch didn't raise" here would prove nothing.
 * ``expected == "reject"``: parsing-then-dispatching ultimately raises
-  :class:`UnsupportedStatementError`. A ``Command`` fallback that dispatch
-  turns into ``UnsupportedStatementError`` is a clean reject; a
-  ``DispatchError`` or a silent success is NOT.
-
-The mock catalog/table mirror ``tests/unit/test_dispatch.py`` but are widened
-so every in-scope construct has a method to call.
+  :class:`UnsupportedStatementError`. Rejects never reach the catalog, so the
+  mock is sufficient for them.
 """
 
 from __future__ import annotations
@@ -79,13 +75,11 @@ def test_corpus_entry(entry) -> None:
     table = _make_table()
     catalog.load_table.return_value = table
 
-    if entry.expected == "apply":
+    if entry.expected in {"apply", "invalid"}:
         stmt = _parse_one(entry.sql)
         assert not isinstance(stmt, exp.Command), (
             f"{entry.id}: parsed to a Command fallback (parse gap): {entry.sql!r}"
         )
-        # Must dispatch without raising.
-        dispatch(catalog, stmt)
     else:
         # A reject may surface at the parse layer (a hard sqlglot ParseError,
         # or a Command fallback which dispatch then rejects) or directly from

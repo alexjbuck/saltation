@@ -194,7 +194,8 @@ def test_write_locally_ordered_by() -> None:
     actions = _alter_actions("ALTER TABLE t WRITE LOCALLY ORDERED BY category, id")
     action = actions[0]
     assert isinstance(action, WriteDistribution)
-    assert action.args.get("mode") == "none"
+    # Spark leaves write.distribution-mode untouched for LOCALLY ORDERED BY.
+    assert action.args.get("mode") is None
     assert len(action.args.get("expressions") or []) == 2
 
 
@@ -220,7 +221,8 @@ def test_write_unordered() -> None:
     actions = _alter_actions("ALTER TABLE t WRITE UNORDERED")
     action = actions[0]
     assert isinstance(action, WriteDistribution)
-    assert action.args.get("mode") == "unordered"
+    assert action.args.get("mode") == "none"
+    assert not (action.args.get("expressions") or [])
 
 
 # ---------------------------------------------------------------------------

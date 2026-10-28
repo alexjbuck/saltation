@@ -270,8 +270,12 @@ async def _drive_watch_reset(
     saw = asyncio.Event()
     remaining = {"n": expected_events}
 
+    started = asyncio.Event()
+
     async def _on_event(event: WatchEvent) -> None:
         events.append(event)
+        if event.kind == "startup":
+            started.set()
         if event.kind in {"applied", "unchanged", "partial", "error"} and event.paths_changed:
             remaining["n"] -= 1
             if remaining["n"] <= 0:
@@ -288,6 +292,9 @@ async def _drive_watch_reset(
     )
 
     try:
+        # Edits made before the watcher starts watching (it first runs the
+        # initial apply) are never seen; wait for its startup event.
+        await asyncio.wait_for(started.wait(), timeout=timeout_s)
         for act in actions:
             await act()
         await asyncio.wait_for(saw.wait(), timeout=timeout_s)

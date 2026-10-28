@@ -21,6 +21,7 @@ from pyiceberg.exceptions import (
     TableAlreadyExistsError,
 )
 from pyiceberg.schema import Schema
+from pyiceberg.table.sorting import NullOrder
 from pyiceberg.transforms import (
     BucketTransform,
     DayTransform,
@@ -127,11 +128,11 @@ def test_drop_namespace_if_exists_swallows_missing() -> None:
     assert "already absent" in result.notes
 
 
-def test_drop_namespace_without_if_exists_raises_missing() -> None:
+def test_drop_namespace_without_if_exists_tolerates_missing() -> None:
     catalog = _make_catalog()
     catalog.drop_namespace.side_effect = NoSuchNamespaceError("nope")
-    with pytest.raises(NoSuchNamespaceError):
-        dispatch(catalog, _single("DROP NAMESPACE foo"))
+    result = dispatch(catalog, _single("DROP NAMESPACE foo"))
+    assert "already absent" in result.notes
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +234,13 @@ def test_alter_add_column() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN c INT"))
     table.update_schema.assert_called()
     us = table.update_schema.return_value.__enter__.return_value
     us.add_column.assert_called_once()
     args = us.add_column.call_args
-    assert args.args[0] == "c"
+    assert args.args[0] == ("c",)
     assert isinstance(args.args[1], IntegerType)
 
 
@@ -247,6 +249,7 @@ def test_alter_add_columns_plural_splits_into_n_commits() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMNS (a INT, b STRING, c BIGINT)"))
     # update_schema invoked once per column → 3 enters of the cm.
     assert table.update_schema.call_count == 3
@@ -465,16 +468,12 @@ def test_write_ordered_by_asc_and_desc() -> None:
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE ORDERED BY (a ASC, b DESC)"))
-    uso = table.update_sort_order.return_value.__enter__.return_value
-    # Both asc and desc called once, with IdentityTransform.
-    uso.asc.assert_called_once()
-    uso.desc.assert_called_once()
-    asc_args = uso.asc.call_args.args
-    desc_args = uso.desc.call_args.args
-    assert asc_args[0] == "a"
-    assert isinstance(asc_args[1], IdentityTransform)
-    assert desc_args[0] == "b"
-    assert isinstance(desc_args[1], IdentityTransform)
+    txn = table.transaction.return_value.__enter__.return_value
+    uso = txn.update_sort_order.return_value.__enter__.return_value
+    # Spark's default null order: ASC -> NULLS FIRST, DESC -> NULLS LAST.
+    assert uso.asc.call_args.args == ("a", IdentityTransform(), NullOrder.NULLS_FIRST)
+    assert uso.desc.call_args.args == ("b", IdentityTransform(), NullOrder.NULLS_LAST)
+    assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "range"}
 
 
 def test_write_ordered_by_default_asc() -> None:
@@ -482,7 +481,8 @@ def test_write_ordered_by_default_asc() -> None:
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE ORDERED BY (a)"))
-    uso = table.update_sort_order.return_value.__enter__.return_value
+    txn = table.transaction.return_value.__enter__.return_value
+    uso = txn.update_sort_order.return_value.__enter__.return_value
     uso.asc.assert_called_once()
 
 
@@ -707,13 +707,24 @@ def test_alter_column_comment_only() -> None:
     assert us.update_column.call_args.kwargs["doc"] == "docs"
 
 
-def test_alter_column_set_not_null() -> None:
+def test_alter_column_set_not_null_on_optional_is_refused() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
-    dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN id SET NOT NULL"))
-    us = table.update_schema.return_value.__enter__.return_value
-    assert us.update_column.call_args.kwargs["required"] is True
+    table.schema.return_value.find_field.return_value = MagicMock(required=False)
+    with pytest.raises(DispatchError, match="NOT NULL"):
+        dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN name SET NOT NULL"))
+    table.update_schema.assert_not_called()
+
+
+def test_alter_column_set_not_null_on_required_is_noop() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.schema.return_value.find_field.return_value = MagicMock(required=True)
+    result = dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN id SET NOT NULL"))
+    assert "already required" in result.notes
+    table.update_schema.assert_not_called()
 
 
 def test_alter_column_drop_not_null() -> None:
@@ -747,6 +758,7 @@ def test_add_column_dotted_path_uses_tuple() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN point.z DOUBLE"))
     us = table.update_schema.return_value.__enter__.return_value
     assert us.add_column.call_args.args[0] == ("point", "z")
@@ -795,14 +807,15 @@ def test_write_ordered_by_sets_range_mode() -> None:
     assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "range"}
 
 
-def test_write_locally_ordered_sets_none_mode() -> None:
+def test_write_locally_ordered_leaves_distribution_mode() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE LOCALLY ORDERED BY category, id"))
     txn = table.transaction.return_value.__enter__.return_value
-    assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "none"}
-    table.update_sort_order.assert_called()
+    txn.set_properties.assert_not_called()
+    uso = txn.update_sort_order.return_value.__enter__.return_value
+    assert uso.asc.call_count == 2
 
 
 def test_write_distributed_sets_hash_mode() -> None:
@@ -819,7 +832,9 @@ def test_write_unordered_clears_sort_order() -> None:
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE UNORDERED"))
-    table.update_sort_order.assert_called_once()
+    txn = table.transaction.return_value.__enter__.return_value
+    txn.update_sort_order.assert_called_once()
+    assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +918,7 @@ def test_alter_add_column_carries_comment() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN c INT COMMENT 'unit: m/s'"))
     us = table.update_schema.return_value.__enter__.return_value
     assert us.add_column.call_args.kwargs["doc"] == "unit: m/s"
@@ -956,5 +972,13 @@ def test_create_table_unknown_clause_is_refused() -> None:
     catalog = _make_catalog()
     sql = "CREATE TABLE foo.t (id BIGINT) USING iceberg CLUSTERED BY (id) INTO 4 BUCKETS"
     with pytest.raises(UnsupportedStatementError):
+        dispatch(catalog, _single(sql))
+    catalog.create_table_transaction.assert_not_called()
+
+
+def test_create_table_duplicate_spark_partition_names_refused() -> None:
+    catalog = _make_catalog()
+    sql = "CREATE TABLE foo.t (c INT) USING iceberg PARTITIONED BY (bucket(4, c), bucket(16, c))"
+    with pytest.raises(DispatchError, match="c_bucket"):
         dispatch(catalog, _single(sql))
     catalog.create_table_transaction.assert_not_called()

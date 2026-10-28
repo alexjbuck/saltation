@@ -135,6 +135,7 @@ _TRANSFORM_COVERAGE: dict[str, tuple[str, ...]] = {
     "days": ("ct_part_days",),
     "hour": ("ct_part_hour", "apf_hour"),
     "hours": ("ct_part_hours",),
+    "date_hour": ("ct_part_date_hour",),
 }
 
 

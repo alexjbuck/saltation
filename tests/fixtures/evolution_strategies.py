@@ -254,7 +254,14 @@ def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableM
     if features.create_partitioned_by and draw(st.booleans()):
         exprs: list[str] = []
         for _ in range(draw(st.integers(min_value=1, max_value=3))):
-            options = _partition_options(t, features)
+            # Spark names CREATE-time fields <col>_bucket / <col>_trunc with no
+            # width, so a second bucket or truncate on one column collides.
+            taken = {(p.source, p.transform.split("[")[0]) for p in t.partition}
+            options = [
+                o
+                for o in _partition_options(t, features)
+                if (o[0].name, o[2].split("[")[0]) not in taken
+            ]
             if not options:
                 break
             col, expr, tr = draw(st.sampled_from(options))
@@ -350,15 +357,18 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
     if kind == "nullability":
         col = draw(st.sampled_from(t.columns))
         t.altered.add(col.name)
-        if col.required:
-            if col.name in t.identifier:
-                return None
-            if col.name in t.ever_identifier and not features.relax_former_identifier:
-                return None
-            col.required = False
-            return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} DROP NOT NULL;"
-        col.required = True
-        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} SET NOT NULL;"
+        # Spark-Iceberg only relaxes nullability; SET NOT NULL is a no-op on a
+        # required column and refused on an optional one.
+        if not col.required:
+            return None
+        if draw(st.booleans()):
+            return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} SET NOT NULL;"
+        if col.name in t.identifier:
+            return None
+        if col.name in t.ever_identifier and not features.relax_former_identifier:
+            return None
+        col.required = False
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} DROP NOT NULL;"
 
     if kind == "reorder":
         col = draw(st.sampled_from(t.columns))

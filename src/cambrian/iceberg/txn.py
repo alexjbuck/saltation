@@ -1,4 +1,9 @@
-"""Rollback primitive: ``restore_pointers`` — the one place ``Transaction._apply`` is used.
+"""Raw table-update commits — the one place ``Transaction._apply`` is used.
+
+Callers: ``restore_pointers`` (the rollback primitive), ``set_location`` and
+``upgrade_format_version``. The latter two exist because PyIceberg's public
+``Transaction.update_location`` is unimplemented and ``upgrade_table_version``
+refuses format v3, while the REST catalog accepts both updates.
 
 PyIceberg 0.11 ships ``Transaction._apply`` as a leading-underscore "private" method.
 In practice it's been stable across the 0.x line and is the only API that can atomically
@@ -16,10 +21,9 @@ codebase has zero direct dependency on PyIceberg internals.
 TODO(upstream): file a PyIceberg issue for a public ``Transaction.apply()`` (or accept
 batch updates on the existing builder surface) so cambrian can drop the underscore.
 
-INVARIANT: This module contains the ONLY call to ``Transaction._apply`` in cambrian.
-``ripgrep '_apply\\b' src/`` should return exactly one match (the call below). New
-multi-update-atomic operations must route through ``restore_pointers`` or a future
-sibling in this module, not add their own private-API leak.
+INVARIANT: ``_commit`` holds the ONLY call to ``Transaction._apply`` in cambrian.
+``ripgrep '_apply\\b' src/`` should return exactly one match. New raw-update
+operations must be siblings in this module that route through ``_commit``.
 """
 
 from __future__ import annotations
@@ -32,9 +36,11 @@ from pyiceberg.table.update import (
     SetCurrentSchemaUpdate,
     SetDefaultSortOrderUpdate,
     SetDefaultSpecUpdate,
+    SetLocationUpdate,
     SetSnapshotRefUpdate,
     TableRequirement,
     TableUpdate,
+    UpgradeFormatVersionUpdate,
 )
 
 from cambrian.errors import ExternalWriteDetectedError, IllegalStateError
@@ -95,9 +101,7 @@ def restore_pointers(
         requirements = (_assert_main(expected_current_snapshot_id),)
 
     try:
-        with table.transaction() as txn:
-            # The sole _apply call site in cambrian; see module docstring.
-            txn._apply(updates=updates, requirements=requirements)
+        _commit(table, updates, requirements)
     except (CommitFailedException, RESTError) as err:
         # Client-side: AssertRefSnapshotId raises CommitFailedException before
         # the REST round-trip. Server-side: Lakekeeper rejects the staged
@@ -110,6 +114,28 @@ def restore_pointers(
             expected_snapshot_id=expected_current_snapshot_id,
             observed_snapshot_id=_observed_main_snapshot_id(table),
         ) from err
+
+
+def set_location(table: Table, location: str) -> None:
+    _commit(table, (SetLocationUpdate(location=location),), ())
+
+
+def upgrade_format_version(table: Table, format_version: int) -> None:
+    """Upgrade to *format_version*; a no-op at or above it (the spec forbids downgrades)."""
+    if table.format_version >= format_version:
+        return
+    update = UpgradeFormatVersionUpdate(format_version=format_version)  # ty: ignore[unknown-argument, missing-argument]
+    _commit(table, (update,), ())
+
+
+def _commit(
+    table: Table,
+    updates: tuple[TableUpdate, ...],
+    requirements: tuple[TableRequirement, ...],
+) -> None:
+    with table.transaction() as txn:
+        # The sole _apply call site in cambrian; see module docstring.
+        txn._apply(updates=updates, requirements=requirements)
 
 
 def _observed_main_snapshot_id(table: Table) -> int | None:

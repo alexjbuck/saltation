@@ -76,8 +76,9 @@ def test_retry_after_partial_apply_converges(
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Lakekeeper v0.12.2 accepts a remove-properties commit but keeps the key; "
-        "reproduces with bare PyIceberg Transaction.remove_properties. Re-enable "
+        "Lakekeeper v0.12.2 acknowledges a remove-properties commit but ignores it "
+        "when the removal would leave the table with no properties at all (removing "
+        "one of several keys works); reproduces with bare PyIceberg. Re-enable "
         "Features.unset_props in the property once this passes."
     ),
 )

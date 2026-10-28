@@ -114,18 +114,15 @@ class UnsetTblProperties(exp.Expression):
 
 
 class WriteDistribution(exp.Expression):
-    """``ALTER TABLE t WRITE [LOCALLY] ORDERED BY ... | DISTRIBUTED BY PARTITION | UNORDERED``.
+    """``ALTER TABLE t WRITE LOCALLY ORDERED BY ... | DISTRIBUTED BY PARTITION | UNORDERED``.
 
-    A single node covers the whole ``WRITE`` distribution-mode family because
-    they all map to the same two PyIceberg levers — the table's sort order and
-    the ``write.distribution-mode`` property. ``mode`` is one of ``"range"``
-    (ORDERED BY), ``"none"`` (LOCALLY ORDERED BY / no global shuffle),
-    ``"hash"`` (DISTRIBUTED BY PARTITION), or ``"unordered"`` (clear the sort
-    order). ``expressions`` carries the :class:`sqlglot.exp.Ordered` sort
-    columns (empty for DISTRIBUTED-only / UNORDERED).
+    Every form replaces the table's sort order with ``expressions`` (empty
+    means unsorted) and, when ``mode`` is set, ``write.distribution-mode``:
+    ``"hash"`` (DISTRIBUTED BY PARTITION) or ``"none"`` (UNORDERED). LOCALLY
+    ORDERED BY carries no mode and leaves the property alone, as Spark does.
     """
 
-    arg_types: t.ClassVar[dict[str, bool]] = {"mode": True, "expressions": False}
+    arg_types: t.ClassVar[dict[str, bool]] = {"mode": False, "expressions": False}
 
 
 class SetIdentifierFields(exp.Expression):

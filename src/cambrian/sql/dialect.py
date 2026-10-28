@@ -92,6 +92,10 @@ def _dotted_path(column: exp.Column) -> str:
     return ".".join(parts)
 
 
+def _namespace_property(key: str, value: exp.Expr | None) -> exp.Property:
+    return exp.Property(this=exp.Literal.string(key), value=value)
+
+
 def _parse_partition_field_payload(
     parser: SparkParser,
 ) -> tuple[exp.Expr | None, exp.Func | None, exp.Expr | None]:
@@ -169,11 +173,11 @@ class CambrianSpark(Spark):
             # A dotted path parses to a Column with a non-empty ``table``/``db``
             # chain; a plain column has just ``this``. Only intercept dotted.
             if isinstance(path, exp.Column) and (path.args.get("table") or path.args.get("db")):
-                kind = self._parse_types()
-                if kind is not None:
-                    return self.expression(
-                        exp.ColumnDef(this=exp.to_identifier(_dotted_path(path)), kind=kind)
-                    )
+                # The full column-def tail (NOT NULL, DEFAULT, COMMENT, FIRST /
+                # AFTER) is the same as for a top-level column.
+                col_def = self._parse_column_def(exp.to_identifier(_dotted_path(path)))
+                if isinstance(col_def, exp.ColumnDef) and col_def.args.get("kind") is not None:
+                    return col_def
             self._retreat(index)
             return None
 
@@ -203,30 +207,49 @@ class CambrianSpark(Spark):
                 return [self.expression(SetIdentifierFields(expressions=clean))]
             return super()._parse_alter_table_set()
 
-        def _parse_alter_table_alter(self) -> exp.Expr | None:
-            # ``ALTER COLUMN c FIRST`` / ``ALTER COLUMN c AFTER other`` — a
-            # position-only reorder with no TYPE/COMMENT. Stock Spark builds an
-            # AlterColumn but leaves FIRST/AFTER unconsumed, so the statement
-            # falls to Command; we consume the trailing position clause and
-            # attach it via ``position``/``after`` so dispatch can reorder.
-            action = super()._parse_alter_table_alter()
-            if (
-                isinstance(action, exp.AlterColumn)
-                and action.args.get("dtype") is None
-                and action.args.get("comment") is None
-                and self._curr is not None
-            ):
-                if self._match_text_seq("FIRST"):
-                    return self.expression(AlterColumnPosition(this=action.this, position="FIRST"))
-                if self._match_text_seq("AFTER"):
-                    return self.expression(
-                        AlterColumnPosition(
-                            this=action.this,
-                            position="AFTER",
-                            after=self._parse_field(any_token=True),
-                        )
+        def _parse_alter_table_alter(self) -> list[exp.Expr] | exp.Expr | None:
+            # Spark's ``ALTER COLUMN <path> <action>...``. Stock Spark trips on
+            # dotted (nested) paths and on FIRST/AFTER, falling to Command, so
+            # the whole clause is parsed here. Type/comment/nullability/default
+            # changes become one AlterColumn; a position becomes a separate
+            # AlterColumnPosition action applied after it.
+            index = self._index
+            self._match(TokenType.COLUMN)
+            path = self._parse_column()
+            if not isinstance(path, exp.Column):
+                self._retreat(index)
+                return super()._parse_alter_table_alter()
+            name = exp.to_identifier(_dotted_path(path))
+            change = exp.AlterColumn(this=name)
+            position: exp.Expr | None = None
+            while self._curr is not None:
+                if self._match_text_seq("TYPE") or self._match_text_seq("SET", "DATA", "TYPE"):
+                    change.set("dtype", self._parse_types())
+                elif self._match_text_seq("COMMENT"):
+                    change.set("comment", self._parse_string())
+                elif self._match_text_seq("SET", "NOT", "NULL"):
+                    change.set("allow_null", False)
+                elif self._match_text_seq("DROP", "NOT", "NULL"):
+                    change.set("drop", True)
+                    change.set("allow_null", True)
+                elif self._match_text_seq("SET", "DEFAULT"):
+                    change.set("default", self._parse_disjunction())
+                elif self._match_text_seq("DROP", "DEFAULT"):
+                    change.set("drop", True)
+                elif self._match_text_seq("FIRST"):
+                    position = AlterColumnPosition(this=name, position="FIRST")
+                elif self._match_text_seq("AFTER"):
+                    position = AlterColumnPosition(
+                        this=name, position="AFTER", after=self._parse_field(any_token=True)
                     )
-            return action
+                else:
+                    break
+            actions: list[exp.Expr] = []
+            if len(change.args) > 1:
+                actions.append(self.expression(change))
+            if position is not None:
+                actions.append(self.expression(position))
+            return actions
 
         def _parse_alter_drop_action(self) -> exp.Expr | None:
             # Stock Spark's drop_column only handles ``DROP COLUMNS (a, b)``
@@ -239,36 +262,27 @@ class CambrianSpark(Spark):
             return super()._parse_alter_drop_action()
 
         def _parse_alter_table_write(self) -> list[exp.Expr]:
-            # The whole ``WRITE`` distribution-mode family per Iceberg-Spark:
-            #   WRITE ORDERED BY <sort>                  → range  + sort
-            #   WRITE LOCALLY ORDERED BY <sort>          → none   + sort
-            #   WRITE DISTRIBUTED BY PARTITION           → hash   (sort unchanged)
-            #   WRITE DISTRIBUTED BY PARTITION LOCALLY ORDERED BY <sort> → hash + sort
-            #   WRITE UNORDERED                          → clear sort order
+            # Mirrors Iceberg's IcebergSqlExtensionsAstBuilder: every form
+            # replaces the whole sort order (empty = unsorted), and sets
+            # write.distribution-mode as below (None = leave it alone).
+            #   WRITE ORDERED BY <sort>                          -> range
+            #   WRITE LOCALLY ORDERED BY <sort>                  -> unchanged
+            #   WRITE DISTRIBUTED BY PARTITION [LOCALLY ORDERED BY <sort>] -> hash
+            #   WRITE UNORDERED                                  -> none
             if self._match_text_seq("UNORDERED"):
-                return [self.expression(WriteDistribution(mode="unordered"))]
-
+                return [self.expression(WriteDistribution(mode="none"))]
             distributed = bool(self._match_text_seq("DISTRIBUTED", "BY", "PARTITION"))
-            # LOCALLY only meaningfully precedes ORDERED BY; consume it so the
-            # mode is "none" (no global range shuffle) rather than "range".
             locally = bool(self._match_text_seq("LOCALLY"))
             ordered = bool(self._match_text_seq("ORDERED", "BY"))
             sort_items = self._parse_ordered_sort_list() if ordered else []
-
             if distributed:
-                # DISTRIBUTED [LOCALLY ORDERED BY ...] → hash. The sort order,
-                # if present, is still applied on top of the hash distribution.
                 return [self.expression(WriteDistribution(mode="hash", expressions=sort_items))]
-            if locally:
-                return [self.expression(WriteDistribution(mode="none", expressions=sort_items))]
+            if locally and ordered:
+                return [self.expression(WriteDistribution(expressions=sort_items))]
             if ordered:
-                # Bare ``WRITE ORDERED BY ...`` → range distribution + sort.
-                # Kept as WriteOrderedBy so the existing dispatch path (and
-                # unit tests) stay valid; the runner sets distribution-mode.
                 return [self.expression(WriteOrderedBy(expressions=sort_items))]
-            # Anything else after WRITE is unsupported; returning an empty list
-            # leaves the Alter with no actions, which falls to Command and is
-            # rejected at dispatch.
+            # Anything else after WRITE leaves the Alter without actions, which
+            # falls to Command and is rejected at dispatch.
             return []
 
         def _parse_ordered_sort_list(self) -> list[exp.Expr]:
@@ -329,10 +343,22 @@ class CambrianSpark(Spark):
             if self._match_set(_NAMESPACE_TOKENS):
                 if_not_exists = self._parse_exists(not_=True)
                 name = self._parse_table_parts()
-                props = self._parse_namespace_properties()
+                # Spark allows COMMENT, LOCATION and WITH (DB)PROPERTIES in any
+                # order; COMMENT/LOCATION are stored as the reserved
+                # ``comment``/``location`` namespace properties.
+                pairs: list[exp.Expr] = []
+                while True:
+                    if self._match_text_seq("COMMENT"):
+                        pairs.append(_namespace_property("comment", self._parse_string()))
+                    elif self._match_text_seq("LOCATION"):
+                        pairs.append(_namespace_property("location", self._parse_string()))
+                    elif (props := self._parse_namespace_properties()) is not None:
+                        pairs.extend(props.expressions)
+                    else:
+                        break
                 node = exp.Create(this=name, kind="NAMESPACE", exists=bool(if_not_exists))
-                if props is not None:
-                    node.set("properties", props)
+                if pairs:
+                    node.set("properties", exp.Properties(expressions=pairs))
                 return self.expression(node)
             self._retreat(index)
             return super()._parse_create()

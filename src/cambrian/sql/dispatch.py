@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
+import pydantic
 from pyiceberg.exceptions import (
     NamespaceAlreadyExistsError,
     NoSuchNamespaceError,
@@ -35,6 +36,7 @@ from pyiceberg.exceptions import (
     TableAlreadyExistsError,
 )
 from pyiceberg.schema import Schema, promote
+from pyiceberg.table.sorting import NullOrder
 from pyiceberg.transforms import (
     BucketTransform,
     DayTransform,
@@ -67,6 +69,7 @@ from sqlglot import expressions as exp
 
 from cambrian.errors import DispatchError, UnsupportedStatementError
 from cambrian.iceberg.affected import TableIdent, affected_tables
+from cambrian.iceberg.txn import set_location
 from cambrian.sql.ast import (
     AddPartitionField,
     AlterColumnPosition,
@@ -89,6 +92,7 @@ _DISTRIBUTION_MODE_KEY = "write.distribution-mode"
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
     from pyiceberg.table import Table
+    from pyiceberg.table.update.schema import UpdateSchema
 
 __all__ = ["DispatchResult", "dispatch"]
 
@@ -216,7 +220,15 @@ def _dispatch_alter_namespace(catalog: Catalog, stmt: AlterNamespaceProperties) 
     inner = stmt.args.get("this")
     namespace = _namespace_from_table_node(inner) if inner is not None else ""
     updates = _properties_dict_from_list(stmt.args.get("expressions"))
-    catalog.update_namespace_properties(namespace, updates=updates)
+    try:
+        catalog.update_namespace_properties(namespace, updates=updates)
+    except pydantic.ValidationError:
+        # PyIceberg requires ``missing`` in the response, but the REST spec
+        # makes it optional and Lakekeeper omits it, so a successful update
+        # fails to deserialize. Trust the catalog's state instead.
+        current = catalog.load_namespace_properties(namespace)
+        if any(current.get(k) != v for k, v in updates.items()):
+            raise
     return DispatchResult(notes=f"set namespace {namespace} properties {sorted(updates)}")
 
 
@@ -248,9 +260,10 @@ def _dispatch_drop_namespace(catalog: Catalog, stmt: exp.Drop) -> DispatchResult
         catalog.drop_namespace(namespace)
         notes = f"dropped namespace {namespace}"
     except NoSuchNamespaceError:
-        if not if_exists:
-            raise
-        notes = f"namespace {namespace} already absent (IF EXISTS)"
+        # Tolerated without IF EXISTS too, like DROP TABLE: a re-applied
+        # evolution meets the namespace it already dropped.
+        suffix = "IF EXISTS" if if_exists else "idempotent re-apply"
+        notes = f"namespace {namespace} already absent ({suffix})"
     return DispatchResult(notes=notes)
 
 
@@ -298,6 +311,9 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
                 "and has no query engine to evaluate the SELECT"
             ),
         )
+    like = _like_source(stmt)
+    if like is not None and isinstance(inner, exp.Table):
+        return _create_table_like(catalog, stmt, inner, like)
     if not isinstance(inner, exp.Schema):
         raise DispatchError(
             "CREATE TABLE without a column list isn't supported (cambrian needs the schema "
@@ -311,11 +327,17 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
     schema = _build_iceberg_schema(column_defs)
     if_not_exists = bool(stmt.args.get("exists"))
     options = _create_table_options(stmt)
+    names = [_create_partition_name(src, tr) for src, tr in options.partition_fields]
+    if dupes := sorted({n for n in names if names.count(n) > 1}):
+        raise DispatchError(
+            f"PARTITIONED BY yields duplicate partition field name(s) {dupes}: Spark names "
+            "CREATE-time fields <col>_bucket / <col>_trunc without the width. Keep one in "
+            "CREATE TABLE and add the other with ALTER TABLE ... ADD PARTITION FIELD"
+        )
 
     try:
         # One create transaction so the table never exists without its spec
-        # and properties. Partition fields go through UpdateSpec (not a
-        # hand-built PartitionSpec) so their names match ADD PARTITION FIELD.
+        # and properties.
         txn = catalog.create_table_transaction(
             identifier=identifier,
             schema=schema,
@@ -325,7 +347,7 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
         if options.partition_fields:
             with txn.update_spec() as us:
                 for source, transform in options.partition_fields:
-                    us.add_field(source, transform)
+                    us.add_field(source, transform, _create_partition_name(source, transform))
         txn.commit_transaction()
         notes = f"created table {'.'.join(identifier)}"
     except TableAlreadyExistsError:
@@ -358,7 +380,7 @@ def _create_table_options(stmt: exp.Create) -> _CreateTableOptions:
     options = _CreateTableOptions()
     props_node = stmt.args.get("properties")
     for prop in props_node.expressions if props_node is not None else []:
-        if isinstance(prop, exp.FileFormatProperty):
+        if isinstance(prop, exp.FileFormatProperty | exp.LikeProperty):
             continue
         if isinstance(prop, exp.PartitionedByProperty):
             inner = prop.this
@@ -382,6 +404,54 @@ def _create_table_options(stmt: exp.Create) -> _CreateTableOptions:
                 ),
             )
     return options
+
+
+def _create_partition_name(source: str, transform: Transform) -> str:
+    # Spark builds CREATE-time specs with Java's PartitionSpec.Builder, whose
+    # default names differ from UpdatePartitionSpec's (ADD PARTITION FIELD):
+    # <col>_bucket / <col>_trunc carry no width suffix.
+    if isinstance(transform, IdentityTransform):
+        return source
+    suffix = {
+        BucketTransform: "bucket",
+        TruncateTransform: "trunc",
+        YearTransform: "year",
+        MonthTransform: "month",
+        DayTransform: "day",
+        HourTransform: "hour",
+    }[type(transform)]
+    return f"{source}_{suffix}"
+
+
+def _like_source(stmt: exp.Create) -> exp.Table | None:
+    props = stmt.args.get("properties")
+    for prop in props.expressions if props is not None else []:
+        if isinstance(prop, exp.LikeProperty) and isinstance(prop.this, exp.Table):
+            return prop.this
+    return None
+
+
+def _create_table_like(
+    catalog: Catalog, stmt: exp.Create, target: exp.Table, source: exp.Table
+) -> DispatchResult:
+    # Spark 4.2 CREATE TABLE ... LIKE copies schema, partitioning, sort order
+    # and properties; never snapshots or location.
+    identifier = _table_identifier(target)
+    src = catalog.load_table(_table_identifier(source))
+    options = _create_table_options(stmt)
+    try:
+        catalog.create_table(
+            identifier=identifier,
+            schema=src.schema(),
+            location=options.location,
+            partition_spec=src.spec(),
+            sort_order=src.sort_order(),
+            properties={**src.properties, **options.properties},
+        )
+        notes = f"created table {'.'.join(identifier)} like {'.'.join(_table_identifier(source))}"
+    except TableAlreadyExistsError:
+        notes = f"table {'.'.join(identifier)} already exists (idempotent)"
+    return DispatchResult(affected_tables=affected_tables(stmt), notes=notes)
 
 
 def _create_partition_field(node: exp.Expression) -> tuple[str, Transform]:
@@ -409,9 +479,13 @@ def _dispatch_drop_table(catalog: Catalog, stmt: exp.Drop) -> DispatchResult:
         raise DispatchError(f"DROP TABLE missing table identifier: {stmt.sql()}")
     identifier = _table_identifier(inner)
     if_exists = bool(stmt.args.get("exists"))
+    purge = bool(stmt.args.get("purge"))
     try:
-        catalog.drop_table(identifier)
-        notes = f"dropped table {'.'.join(identifier)}"
+        if purge:
+            catalog.purge_table(identifier)
+        else:
+            catalog.drop_table(identifier)
+        notes = f"{'purged' if purge else 'dropped'} table {'.'.join(identifier)}"
     except NoSuchTableError:
         if not if_exists:
             # Same idempotent reasoning as create_table — tolerate the
@@ -543,21 +617,42 @@ def _dispatch_alter_action(
 def _add_column(table: Table, col_def: exp.ColumnDef) -> str:
     name = col_def.name
     dtype = _iceberg_type_from_sqlglot(col_def.args.get("kind"))
-    # A dotted name (``point.z``) is a nested-field add; PyIceberg takes the
-    # path as a tuple. A plain name is passed through as the bare string.
-    path: str | tuple[str, ...] = tuple(name.split(".")) if "." in name else name
-    # ALTER TABLE ... ADD COLUMN is always nullable in Spark/Iceberg unless
-    # the user gives a NOT NULL constraint — we err on the safe side
-    # (required=False) so re-applies don't fight a NULL existing row.
-    try:
-        with table.update_schema() as us:
-            us.add_column(path, dtype, doc=_column_comment(col_def), required=False)
-    except ValueError as err:
-        # PyIceberg raises a ValueError on duplicate add. Idempotent contract.
-        if "already exists" in str(err).lower() or "duplicate" in str(err).lower():
-            return f"add column {name}: already exists (idempotent)"
-        raise
+    path = tuple(name.split("."))
+    if _has_field(table, name):
+        return f"add column {name}: already exists (idempotent)"
+    if _is_required(col_def):
+        # Spark-Iceberg refuses this: existing rows have no value for the new
+        # column, so it can only be required once v3 defaults supply one.
+        raise DispatchError(
+            f"cannot add required column {name}: existing rows would have no value. "
+            "Add it as nullable, or (format v3) give it a DEFAULT"
+        )
+    with table.update_schema() as us:
+        us.add_column(path, dtype, doc=_column_comment(col_def), required=False)
+        _apply_position(us, name, col_def.args.get("position"))
     return f"add column {name}"
+
+
+def _apply_position(us: UpdateSchema, name: str, position: exp.Expression | None) -> None:
+    """Apply a Spark ``FIRST`` / ``AFTER <sibling>`` clause to *name* within *us*."""
+    if position is None:
+        return
+    where = (position.args.get("position") or "").upper()
+    if where == "FIRST":
+        us.move_first(name)
+    elif where == "AFTER":
+        us.move_after(
+            name,
+            _sibling_path(
+                name, _column_name(position.args.get("this") or position.args.get("after"))
+            ),
+        )
+
+
+def _sibling_path(name: str, other: str) -> str:
+    # Spark resolves AFTER's anchor within the moved field's own struct.
+    parent, _, _ = name.rpartition(".")
+    return f"{parent}.{other}" if parent and "." not in other else other
 
 
 def _drop_column(table: Table, action: exp.Drop) -> str:
@@ -568,9 +663,9 @@ def _drop_column(table: Table, action: exp.Drop) -> str:
     # exp.Schema (plural with parens).
     kind = (action.args.get("kind") or "").upper()
     if kind == "COLUMNS" and isinstance(inner, exp.Schema):
-        names = [col.name for col in inner.args.get("expressions") or []]
+        names = [_column_name(col) for col in inner.args.get("expressions") or []]
     else:
-        names = [inner.name]
+        names = [_column_name(inner)]
     notes: list[str] = []
     for name in names:
         if not _has_field(table, name):
@@ -593,9 +688,9 @@ def _has_field(table: Table, name: str) -> bool:
 
 
 def _rename_column(table: Table, action: exp.RenameColumn) -> str:
-    old = action.args["this"].name
+    old = _column_name(action.args["this"])
     new = action.args["to"].name
-    if not _has_field(table, old) and _has_field(table, new):
+    if not _has_field(table, old) and _has_field(table, _sibling_path(old, new)):
         return f"rename column {old} -> {new}: source already absent (idempotent)"
     with table.update_schema() as us:
         us.rename_column(old, new)
@@ -628,8 +723,14 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
         doc = _scalar(comment_node)
         notes.append("comment")
     if allow_null is False:
-        required = True
-        notes.append("set not null")
+        # Spark-Iceberg refuses optional -> required (existing rows may hold
+        # NULLs) and treats an already-required column as a no-op.
+        if not table.schema().find_field(name).required:
+            raise DispatchError(
+                f"cannot change nullable column {name} to NOT NULL: Iceberg can't know "
+                "that existing rows have no NULLs"
+            )
+        notes.append("set not null: already required (idempotent)")
     elif allow_null is True:
         required = False
         notes.append("drop not null")
@@ -642,13 +743,8 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
                 "is not supported"
             ),
         )
-    # SET NOT NULL tightens an optional column to required; PyIceberg blocks
-    # that by default (existing rows might hold NULLs). Spark-Iceberg allows
-    # the change and leaves data correctness to the user, so opt into the
-    # incompatible change only when we're tightening (required is True).
-    allow_incompatible = required is True
     if field_type is not None or required is not None or doc is not None:
-        with table.update_schema(allow_incompatible_changes=allow_incompatible) as us:
+        with table.update_schema() as us:
             us.update_column(name, field_type=field_type, required=required, doc=doc)
     return f"alter column {name} ({', '.join(notes)})"
 
@@ -675,10 +771,9 @@ def _alter_column_position(table: Table, action: AlterColumnPosition) -> str:
             us.move_first(name)
         else:
             after = action.args.get("after")
-            anchor = after.name if after is not None else None
-            if anchor is None:
+            if after is None:
                 raise DispatchError(f"ALTER COLUMN AFTER missing anchor column: {action.sql()}")
-            us.move_after(name, anchor)
+            us.move_after(name, _sibling_path(name, _column_name(after)))
     return f"reorder column {name} {position}"
 
 
@@ -730,6 +825,13 @@ def _drop_identifier_fields(table: Table, action: DropIdentifierFields) -> str:
 
 
 def _set_tblproperties(table: Table, action: exp.AlterSet) -> str:
+    location = action.args.get("location")
+    if location is not None:
+        target = _scalar(location) or ""
+        if table.location() == target:
+            return f"set location {target}: unchanged (idempotent)"
+        set_location(table, target)
+        return f"set location {target}"
     # Pull the (key, value) pairs out of the AlterSet's nested Properties.
     props: dict[str, str] = {}
     for expression in action.args.get("expressions") or []:
@@ -742,7 +844,10 @@ def _set_tblproperties(table: Table, action: exp.AlterSet) -> str:
                         continue
                     props[key] = "" if value is None else value
     if not props:
-        return "set tblproperties: (no keys parsed)"
+        raise UnsupportedStatementError(
+            statement_sql=action.sql(),
+            reason="ALTER TABLE ... SET supports TBLPROPERTIES, LOCATION and IDENTIFIER FIELDS",
+        )
     with table.transaction() as txn:
         # PyIceberg's set_properties takes a dict via the first positional
         # ``properties`` arg, NOT **kwargs of stringified Properties.
@@ -926,7 +1031,9 @@ def _column_name(node: exp.Expression | None) -> str:
     """
     if node is None:
         raise DispatchError("column reference is empty")
-    if isinstance(node, exp.Column | exp.Identifier):
+    if isinstance(node, exp.Column):
+        return ".".join(part.name for part in node.parts)
+    if isinstance(node, exp.Identifier):
         return node.name
     # ``truncate(N, col)`` is parsed as Trunc(this=Literal(N), decimals=col),
     # so the source column is under ``decimals`` rather than ``expressions``.
@@ -937,7 +1044,7 @@ def _column_name(node: exp.Expression | None) -> str:
     if isinstance(node, exp.Func):
         for arg in node.args.get("expressions") or []:
             if isinstance(arg, exp.Column | exp.Identifier):
-                return arg.name
+                return _column_name(arg)
         this = node.args.get("this")
         if this is not None:
             return _column_name(_unwrap_cast(this))
@@ -969,6 +1076,10 @@ def _transform_from_func(node: exp.Func) -> Transform:
     # identity is what matters. Untyped/anonymous calls (bucket, truncate,
     # identity, years/months/days/hours when sqlglot doesn't recognise them
     # specifically) carry the function name in ``node.name`` directly.
+    # Spark's documented aliases: date(ts) (parsed as CAST(ts AS DATE)) is
+    # day(ts); date_hour(ts) is hour(ts).
+    if isinstance(node, exp.Cast) and node.to.is_type(exp.DataType.Type.DATE):
+        return DayTransform()
     if isinstance(node, exp.Year):
         return YearTransform()
     if isinstance(node, exp.Month):
@@ -993,7 +1104,7 @@ def _transform_from_func(node: exp.Func) -> Transform:
         return MonthTransform()
     if name in ("day", "days"):
         return DayTransform()
-    if name in ("hour", "hours"):
+    if name in ("hour", "hours", "date_hour"):
         return HourTransform()
     if name == "identity":
         return IdentityTransform()
@@ -1035,54 +1146,47 @@ def _transform_int_arg(node: exp.Func) -> int:
 
 
 def _write_ordered_by(table: Table, action: WriteOrderedBy) -> str:
-    # WRITE ORDERED BY → set the sort order AND the range distribution mode.
-    parts = _apply_sort_order(table, action.args.get("expressions") or [])
-    _set_distribution_mode(table, "range")
-    return f"write ordered by ({', '.join(parts)}); distribution-mode=range"
+    return _replace_write_order(table, action.args.get("expressions") or [], "range")
 
 
 def _write_distribution(table: Table, action: WriteDistribution) -> str:
-    mode = action.args.get("mode") or ""
-    sort_items = action.args.get("expressions") or []
-    if mode == "unordered":
-        # WRITE UNORDERED clears the sort order back to unsorted; PyIceberg's
-        # empty update_sort_order context commits the unsorted order.
-        with table.update_sort_order():
-            pass
-        return "write unordered (sort order cleared)"
-    parts = _apply_sort_order(table, sort_items) if sort_items else []
-    # none → WRITE LOCALLY ORDERED BY; hash → WRITE DISTRIBUTED BY PARTITION.
-    _set_distribution_mode(table, mode)
-    suffix = f" ordered by ({', '.join(parts)})" if parts else ""
-    return f"write distribution-mode={mode}{suffix}"
+    return _replace_write_order(
+        table, action.args.get("expressions") or [], action.args.get("mode")
+    )
 
 
-def _apply_sort_order(table: Table, items: list[exp.Expression]) -> list[str]:
+def _replace_write_order(table: Table, items: list[exp.Expression], mode: str | None) -> str:
+    """Replace the sort order (empty = unsorted) and optionally the distribution mode.
+
+    One transaction, matching Spark-Iceberg's SetWriteDistributionAndOrderingExec.
+    """
     parts: list[str] = []
-    with table.update_sort_order() as uso:
-        for item in items:
-            if isinstance(item, exp.Ordered):
-                col_name = _column_name(item.args.get("this"))
-                desc = bool(item.args.get("desc"))
-            else:
-                col_name = _column_name(item)
-                desc = False
-            # Per PyIceberg quirks memory: ``asc/desc`` require an explicit
-            # transform argument in 0.11.1. We pass IdentityTransform() for
-            # the simple column-sort case; transform-in-sort would need the
-            # transform decoded here.
-            if desc:
-                uso.desc(col_name, IdentityTransform())
-                parts.append(f"{col_name} DESC")
-            else:
-                uso.asc(col_name, IdentityTransform())
-                parts.append(f"{col_name} ASC")
-    return parts
-
-
-def _set_distribution_mode(table: Table, mode: str) -> None:
     with table.transaction() as txn:
-        txn.set_properties(properties={_DISTRIBUTION_MODE_KEY: mode})
+        with txn.update_sort_order() as uso:
+            for item in items:
+                ordered = item if isinstance(item, exp.Ordered) else exp.Ordered(this=item)
+                term = ordered.args.get("this")
+                transform = (
+                    _transform_from_func(term)
+                    if isinstance(term, exp.Func)
+                    else IdentityTransform()
+                )
+                column = _column_name(term)
+                desc = bool(ordered.args.get("desc"))
+                # sqlglot fills nulls_first from Spark's default (ASC -> NULLS
+                # FIRST, DESC -> NULLS LAST) when the SQL doesn't say; PyIceberg's
+                # own default is NULLS LAST, so always pass it explicitly.
+                nulls = (
+                    NullOrder.NULLS_FIRST
+                    if ordered.args.get("nulls_first")
+                    else NullOrder.NULLS_LAST
+                )
+                (uso.desc if desc else uso.asc)(column, transform, nulls)
+                parts.append(f"{column} {transform} {'DESC' if desc else 'ASC'} {nulls}")
+        if mode is not None:
+            txn.set_properties(properties={_DISTRIBUTION_MODE_KEY: mode})
+    order = ", ".join(parts) or "unsorted"
+    return f"write order ({order})" + (f"; distribution-mode={mode}" if mode else "")
 
 
 # ---------------------------------------------------------------------------
@@ -1392,7 +1496,8 @@ def _struct_type_from_sqlglot(kind: exp.DataType, ids: _FieldIds) -> StructType:
                 field_id=field_id,
                 name=member.name,
                 field_type=_iceberg_type_from_sqlglot(member.args.get("kind"), ids),
-                required=False,
+                required=_is_required(member),
+                doc=_column_comment(member),
             )
         )
     return StructType(*fields)

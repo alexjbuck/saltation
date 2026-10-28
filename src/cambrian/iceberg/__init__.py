@@ -6,7 +6,7 @@ from cambrian.iceberg.affected import (
     affected_tables_with_overrides,
 )
 from cambrian.iceberg.checkpoint import Checkpoint, capture, pin
-from cambrian.iceberg.txn import restore_pointers
+from cambrian.iceberg.txn import restore_pointers, set_location, upgrade_format_version
 
 __all__ = [
     "Checkpoint",
@@ -16,4 +16,6 @@ __all__ = [
     "capture",
     "pin",
     "restore_pointers",
+    "set_location",
+    "upgrade_format_version",
 ]
