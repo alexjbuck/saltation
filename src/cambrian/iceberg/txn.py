@@ -30,6 +30,7 @@ operations must be siblings in this module that route through ``_commit``.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from pyiceberg.exceptions import CommitFailedException, RESTError
 from pyiceberg.schema import Schema
@@ -38,8 +39,11 @@ from pyiceberg.table.refs import SnapshotRefType
 from pyiceberg.table.update import (
     AddSchemaUpdate,
     AssertRefSnapshotId,
+    RemovePartitionSpecsUpdate,
     RemovePropertiesUpdate,
+    RemoveSchemasUpdate,
     RemoveSnapshotRefUpdate,
+    RemoveSnapshotsUpdate,
     SetCurrentSchemaUpdate,
     SetDefaultSortOrderUpdate,
     SetDefaultSpecUpdate,
@@ -54,6 +58,13 @@ from pyiceberg.table.update import (
 from cambrian.errors import ExternalWriteDetectedError
 
 
+@dataclass(frozen=True)
+class Prune:
+    snapshot_ids: frozenset[int] = frozenset()
+    schema_ids: frozenset[int] = frozenset()
+    spec_ids: frozenset[int] = frozenset()
+
+
 def restore_pointers(
     table: Table,
     *,
@@ -63,11 +74,14 @@ def restore_pointers(
     target_sort_order_id: int,
     expected_current_snapshot_id: int | None,
     target_properties: Mapping[str, str] | None = None,
+    prune: Prune | None = None,
 ) -> None:
     """Atomically restore the four pointers (snapshot ref, schema, spec, sort order).
 
     With ``target_properties``, the table's properties are restored in the same
-    commit (keys set to their old values, keys added since then removed).
+    commit (keys set to their old values, keys added since then removed). With
+    ``prune``, the snapshots, schemas and specs added since the target are
+    removed too, so the table carries no trace of the undone changes.
 
     ``expected_current_snapshot_id`` is the snapshot id the caller observed on the
     ``main`` ref at the moment they decided to roll back. If the catalog disagrees at
@@ -112,6 +126,9 @@ def restore_pointers(
             updates = (*updates, SetPropertiesUpdate(updates=changed))
         if removed:
             updates = (*updates, RemovePropertiesUpdate(removals=removed))
+
+    if prune is not None:
+        updates = (*updates, *_prune_updates(prune))
 
     try:
         _commit(table, updates, requirements)
@@ -197,6 +214,18 @@ def _set_main_ref(snapshot_id: int) -> SetSnapshotRefUpdate:
     # fmt: off
     return SetSnapshotRefUpdate(ref_name="main", type=SnapshotRefType.BRANCH, snapshot_id=snapshot_id)  # noqa: E501  # ty: ignore[unknown-argument, missing-argument]
     # fmt: on
+
+
+def _prune_updates(prune: Prune) -> list[TableUpdate]:
+    # Snapshots first: a spec or schema can't go while a snapshot uses it.
+    out: list[TableUpdate] = []
+    if prune.snapshot_ids:
+        out.append(RemoveSnapshotsUpdate(snapshot_ids=sorted(prune.snapshot_ids)))  # ty: ignore[unknown-argument, missing-argument]
+    if prune.spec_ids:
+        out.append(RemovePartitionSpecsUpdate(spec_ids=sorted(prune.spec_ids)))  # ty: ignore[unknown-argument, missing-argument]
+    if prune.schema_ids:
+        out.append(RemoveSchemasUpdate(schema_ids=sorted(prune.schema_ids)))  # ty: ignore[unknown-argument, missing-argument]
+    return out
 
 
 def _remove_main() -> RemoveSnapshotRefUpdate:

@@ -413,3 +413,31 @@ def test_reset_refuses_to_undo_a_format_upgrade(
         apply_reset(cfg)
     # Refused before touching anything.
     assert [f.name for f in rest_catalog.load_table((ns, "t")).schema().fields] == ["id"]
+
+
+def test_reset_forgets_partition_fields_of_undone_edits(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    """Edit 1 partitions by a new column; edit 2 re-adds that column with another type."""
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    _write(
+        current,
+        f"ALTER TABLE {ns}.t ADD COLUMN region STRING;\n"
+        f"ALTER TABLE {ns}.t ADD PARTITION FIELD region;\n"
+        f"INSERT INTO {ns}.t VALUES (1, 'eu');\n",
+    )
+    assert apply_reset(cfg).status == "applied"
+    _write(current, f"ALTER TABLE {ns}.t ADD COLUMN region INT;\n")
+    assert apply_reset(cfg).status == "applied"
+
+    table = rest_catalog.load_table((ns, "t"))
+    assert [(f.name, str(f.field_type)) for f in table.schema().fields] == [
+        ("id", "long"),
+        ("region", "int"),
+    ]
+    assert [s.spec_id for s in table.metadata.partition_specs] == [0]
+    assert table.current_snapshot() is None

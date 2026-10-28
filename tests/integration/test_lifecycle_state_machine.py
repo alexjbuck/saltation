@@ -91,6 +91,8 @@ class Lifecycle(RuleBasedStateMachine):
         self.current: EvolutionScript | None = None
         self.extending = False
         self.applied = False
+        # What the catalog should hold; only running something changes it.
+        self.live: dict[str, Any] = {}
         self.seen: dict[str, Any] = {}
 
     @initialize(
@@ -100,6 +102,7 @@ class Lifecycle(RuleBasedStateMachine):
     def start(self, base: EvolutionScript, legacy: bool) -> None:
         apply_script(self.catalog, base.render(self.ns))
         self.committed_base = base
+        self.live = base.expected
         if legacy:
             # A sidecar an older cambrian created: v1 tables, version 1.
             SELF_MIGRATIONS[0](self.catalog, self.sidecar)
@@ -135,19 +138,24 @@ class Lifecycle(RuleBasedStateMachine):
     def apply(self) -> None:
         result = apply_idempotent(self.config)
         assert result.error is None, result.error
+        assert self.current is not None
         self.applied = True
+        self.live = self.current.expected
 
     @precondition(lambda self: self.current is not None)
     @rule()
     def reset(self) -> None:
         result = apply_reset(self.config)
         assert result.error is None, result.error
+        assert self.current is not None
         self.applied = True
+        self.live = self.current.expected
 
     @rule()
     def rollback(self) -> None:
         rollback_to_last_checkpoint(self.config)
         self.applied = False
+        self.live = self.top.expected
 
     @precondition(lambda self: self.current is not None and self.current.statements)
     @rule()
@@ -170,13 +178,12 @@ class Lifecycle(RuleBasedStateMachine):
         self.current = self.committed.pop()
         self.extending = False
         self.applied = False
+        self.live = self.top.expected
 
     @invariant()
     def catalog_matches_model(self) -> None:
-        if not hasattr(self, "committed_base"):
-            return
-        expected = self.current.expected if self.applied and self.current else self.top.expected
-        assert catalog_fingerprint(self.catalog, self.ns) == expected
+        if self.live:
+            assert catalog_fingerprint(self.catalog, self.ns) == self.live
 
     @invariant()
     def event_log_only_grows(self) -> None:

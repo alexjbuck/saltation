@@ -40,7 +40,7 @@ from cambrian.iceberg.affected import (
     affected_views,
 )
 from cambrian.iceberg.checkpoint import Checkpoint, capture, pin
-from cambrian.iceberg.txn import restore_pointers
+from cambrian.iceberg.txn import Prune, restore_pointers
 from cambrian.iceberg.views import require_rest
 from cambrian.iceberg.views import set_current_version as set_current_view_version
 from cambrian.sidecar.events import (
@@ -60,6 +60,7 @@ from cambrian.sql.script import parse_script
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
     from pyiceberg.table import Table
+    from pyiceberg.table.metadata import TableMetadata
 
     from cambrian.config import CambrianConfig
 
@@ -719,17 +720,46 @@ def _baseline_view_row(catalog: Catalog, ident: TableIdent) -> TableStateRow:
     )
 
 
+def _base_metadata(table: Table, row: TableStateRow) -> TableMetadata | None:
+    if row.pre_metadata_loc is None:
+        return None
+    try:
+        return FromInputFile.table_metadata(table.io.new_input(row.pre_metadata_loc))
+    except (FileNotFoundError, OSError):
+        # Old metadata files can be cleaned up; restore then skips what needs it.
+        return None
+
+
 def _upgraded_since(catalog: Catalog, row: TableStateRow) -> bool:
     table = catalog.load_table(_ident_str_to_tuple(row.table_ident))
-    if table.format_version == 1 or row.pre_metadata_loc is None:
+    if table.format_version == 1:
         return False
-    try:
-        base = FromInputFile.table_metadata(table.io.new_input(row.pre_metadata_loc))
-    except (FileNotFoundError, OSError):
-        # Old metadata files can be cleaned up; the commit itself will then
-        # fail on any field the old schema can't express.
-        return False
-    return table.format_version > base.format_version
+    base = _base_metadata(table, row)
+    return base is not None and table.format_version > base.format_version
+
+
+def _prune_since(table: Table, base: TableMetadata | None) -> Prune | None:
+    """What reset removes beyond the pointers: everything added since *base*.
+
+    Specs and schemas the undone edits added would otherwise constrain later
+    edits (a new column can't reuse the name of an old identity partition
+    field). Skipped when another ref holds one of the newer snapshots.
+    """
+    if base is None:
+        return None
+    meta = table.metadata
+    snapshots = {s.snapshot_id for s in meta.snapshots} - {s.snapshot_id for s in base.snapshots}
+    if any(ref.snapshot_id in snapshots for name, ref in meta.refs.items() if name != "main"):
+        return None
+    return Prune(
+        snapshot_ids=frozenset(snapshots),
+        schema_ids=frozenset(
+            {s.schema_id for s in meta.schemas} - {s.schema_id for s in base.schemas}
+        ),
+        spec_ids=frozenset(
+            {s.spec_id for s in meta.partition_specs} - {s.spec_id for s in base.partition_specs}
+        ),
+    )
 
 
 def _existed(row: TableStateRow) -> bool:
@@ -814,6 +844,7 @@ def _restore_baseline(catalog: Catalog, baseline: _Baseline) -> list[TableRollba
             target_sort_order_id=cp.sort_order_id,
             expected_current_snapshot_id=current_snap,
             target_properties=row.pre_properties,
+            prune=_prune_since(table, _base_metadata(table, row)),
         )
         rollbacks.append(
             TableRollback(
@@ -981,9 +1012,11 @@ def apply_reset(
         )
 
     for ident in idents:
-        baseline.setdefault(("table", str(ident)), _baseline_table_row(catalog, ident))
+        if ("table", str(ident)) not in baseline:
+            baseline["table", str(ident)] = _baseline_table_row(catalog, ident)
     for ident in view_idents:
-        baseline.setdefault(("view", str(ident)), _baseline_view_row(catalog, ident))
+        if ("view", str(ident)) not in baseline:
+            baseline["view", str(ident)] = _baseline_view_row(catalog, ident)
 
     rollbacks = _restore_baseline(catalog, baseline)
     rollback_event_id = _write_baseline(
