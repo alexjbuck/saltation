@@ -95,7 +95,7 @@ def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
 
 def _initial_schema(ns: str) -> str:
     # Three tables. ``events`` becomes partitioned via ADD PARTITION FIELD
-    # (PARTITIONED BY at CREATE-time is out of scope for v1 dispatch).
+    # to exercise partition evolution on an existing table.
     # ``audit`` gets a sort order. ``users`` stays plain to anchor the test
     # against a "normal" table.
     return (

@@ -310,9 +310,23 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
     column_defs = inner.args.get("expressions") or []
     schema = _build_iceberg_schema(column_defs)
     if_not_exists = bool(stmt.args.get("exists"))
+    options = _create_table_options(stmt)
 
     try:
-        catalog.create_table(identifier=identifier, schema=schema)
+        # One create transaction so the table never exists without its spec
+        # and properties. Partition fields go through UpdateSpec (not a
+        # hand-built PartitionSpec) so their names match ADD PARTITION FIELD.
+        txn = catalog.create_table_transaction(
+            identifier=identifier,
+            schema=schema,
+            location=options.location,
+            properties=options.properties,
+        )
+        if options.partition_fields:
+            with txn.update_spec() as us:
+                for source, transform in options.partition_fields:
+                    us.add_field(source, transform)
+        txn.commit_transaction()
         notes = f"created table {'.'.join(identifier)}"
     except TableAlreadyExistsError:
         if not if_not_exists:
@@ -326,6 +340,67 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
         affected_tables=affected_tables(stmt),
         notes=notes,
     )
+
+
+@dataclass
+class _CreateTableOptions:
+    partition_fields: list[tuple[str, Transform]] = field(default_factory=list)
+    properties: dict[str, str] = field(default_factory=dict)
+    location: str | None = None
+
+
+def _create_table_options(stmt: exp.Create) -> _CreateTableOptions:
+    """Collect PARTITIONED BY / COMMENT / LOCATION / TBLPROPERTIES from a CREATE TABLE.
+
+    Anything else in the property list is refused rather than dropped: a
+    silently ignored clause is a table that differs from the SQL.
+    """
+    options = _CreateTableOptions()
+    props_node = stmt.args.get("properties")
+    for prop in props_node.expressions if props_node is not None else []:
+        if isinstance(prop, exp.FileFormatProperty):
+            continue
+        if isinstance(prop, exp.PartitionedByProperty):
+            inner = prop.this
+            nodes = inner.expressions if isinstance(inner, exp.Schema) else [inner]
+            options.partition_fields.extend(_create_partition_field(n) for n in nodes)
+        elif isinstance(prop, exp.SchemaCommentProperty):
+            # Spark-Iceberg stores the table comment as the ``comment`` property.
+            options.properties["comment"] = _scalar(prop.this) or ""
+        elif isinstance(prop, exp.LocationProperty):
+            options.location = _scalar(prop.this)
+        elif type(prop) is exp.Property:
+            key = _scalar(prop.args.get("this"))
+            if key is not None:
+                options.properties[key] = _scalar(prop.args.get("value")) or ""
+        else:
+            raise UnsupportedStatementError(
+                statement_sql=stmt.sql(),
+                reason=(
+                    f"CREATE TABLE clause {prop.sql()!r} is not supported; v1 handles "
+                    "PARTITIONED BY, COMMENT, LOCATION and TBLPROPERTIES"
+                ),
+            )
+    return options
+
+
+def _create_partition_field(node: exp.Expression) -> tuple[str, Transform]:
+    # sqlglot's Spark parser gives bucket/truncate dedicated nodes inside
+    # PARTITIONED BY (unlike ADD PARTITION FIELD, where they are plain Funcs).
+    if isinstance(node, exp.PartitionedByBucket):
+        return _column_name(node.this), BucketTransform(num_buckets=_int_literal(node))
+    if isinstance(node, exp.PartitionByTruncate):
+        return _column_name(node.this), TruncateTransform(width=_int_literal(node))
+    if isinstance(node, exp.Func):
+        return _column_name(node), _transform_from_func(node)
+    return _column_name(node), IdentityTransform()
+
+
+def _int_literal(node: exp.Expression) -> int:
+    lit = node.args.get("expression")
+    if not isinstance(lit, exp.Literal) or lit.is_string:
+        raise DispatchError(f"expected an integer literal in {node.sql()}")
+    return int(lit.this)
 
 
 def _dispatch_drop_table(catalog: Catalog, stmt: exp.Drop) -> DispatchResult:

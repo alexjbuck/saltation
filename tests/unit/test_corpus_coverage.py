@@ -39,6 +39,7 @@ def _make_catalog() -> MagicMock:
             "drop_namespace",
             "update_namespace_properties",
             "create_table",
+            "create_table_transaction",
             "drop_table",
             "rename_table",
             "load_table",

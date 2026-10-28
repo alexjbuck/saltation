@@ -39,6 +39,7 @@ __all__ = [
 
 PROP_PREFIX = "cambrian.p."
 DISTRIBUTION_MODE = "write.distribution-mode"
+TABLE_COMMENT = "comment"
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,7 @@ class TableModel:
     altered: set[str] = field(default_factory=set)
     ever_identifier: set[str] = field(default_factory=set)
     reordered: bool = False
+    dropped_partitions: set[tuple[str, str]] = field(default_factory=set)
     next_col: int = 0
 
     def droppable(self, features: Features) -> list[Column]:
@@ -176,6 +178,9 @@ class Features:
 
     column_comments_on_add: bool = True
     column_comments_on_create: bool = True
+    create_partitioned_by: bool = True
+    create_comment: bool = True
+    create_tblproperties: bool = True
     drop_column: bool = True
     # The three flags below generate scripts where a later statement breaks an
     # earlier one's precondition, so the script can't be replayed. Per the
@@ -183,6 +188,8 @@ class Features:
     drop_after_alter: bool = False
     relax_former_identifier: bool = False
     multiple_reorders: bool = False
+    # Re-adding a dropped partition field reorders the spec on replay.
+    readd_partition_field: bool = False
     alter_type: bool = True
     alter_comment: bool = True
     alter_nullability: bool = True
@@ -243,8 +250,40 @@ def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableM
             d += f" COMMENT '{lit}'"
         t.columns.append(col)
         defs.append(d)
-    sql = f"CREATE TABLE IF NOT EXISTS {_q(name)} ({', '.join(defs)}) USING iceberg;"
-    return sql, t
+    sql = f"CREATE TABLE IF NOT EXISTS {_q(name)} ({', '.join(defs)}) USING iceberg"
+    if features.create_partitioned_by and draw(st.booleans()):
+        exprs: list[str] = []
+        for _ in range(draw(st.integers(min_value=1, max_value=3))):
+            options = _partition_options(t, features)
+            if not options:
+                break
+            col, expr, tr = draw(st.sampled_from(options))
+            t.partition.append(PartitionField(col.name, tr, expr))
+            t.pinned.add(col.name)
+            exprs.append(expr)
+        sql += f" PARTITIONED BY ({', '.join(exprs)})"
+    if features.create_comment and draw(st.booleans()):
+        lit, t.props[TABLE_COMMENT] = draw(_DOCS)
+        sql += f" COMMENT '{lit}'"
+    if features.create_tblproperties and draw(st.booleans()):
+        kv = draw(st.dictionaries(_PROP_KEYS, _PROP_VALS, min_size=1, max_size=3))
+        t.props.update(kv)
+        sql += " TBLPROPERTIES (" + ", ".join(f"'{k}'='{v}'" for k, v in kv.items()) + ")"
+    return sql + ";", t
+
+
+def _partition_options(t: TableModel, features: Features) -> list[tuple[Column, str, str]]:
+    used = {(p.source, p.transform) for p in t.partition}
+    if not features.readd_partition_field:
+        used |= t.dropped_partitions
+    options: list[tuple[Column, str, str]] = []
+    for c in t.columns:
+        has_time = any(p.source == c.name and p.transform in _TIME_TRANSFORMS for p in t.partition)
+        for tmpl, tr in _transforms(c.type):
+            if (c.name, tr) in used or (tr in _TIME_TRANSFORMS and has_time):
+                continue
+            options.append((c, tmpl.format(c=c.name), tr))
+    return options
 
 
 def _candidates(t: TableModel, features: Features) -> list[str]:
@@ -336,16 +375,7 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
         return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} AFTER {anchor.name};"
 
     if kind == "add_partition":
-        options: list[tuple[Column, str, str]] = []
-        for c in t.columns:
-            used = {(p.source, p.transform) for p in t.partition}
-            has_time = any(
-                p.source == c.name and p.transform in _TIME_TRANSFORMS for p in t.partition
-            )
-            for tmpl, tr in _transforms(c.type):
-                if (c.name, tr) in used or (tr in _TIME_TRANSFORMS and has_time):
-                    continue
-                options.append((c, tmpl.format(c=c.name), tr))
+        options = _partition_options(t, features)
         if not options:
             return None
         col, expr, tr = draw(st.sampled_from(options))
@@ -356,6 +386,7 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
     if kind == "drop_partition":
         pf = draw(st.sampled_from(t.partition))
         t.partition.remove(pf)
+        t.dropped_partitions.add((pf.source, pf.transform))
         return f"ALTER TABLE {tbl} DROP PARTITION FIELD {pf.sql};"
 
     if kind == "sort":
@@ -449,7 +480,7 @@ def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str,
         props = {
             k: v
             for k, v in table.properties.items()
-            if k.startswith(PROP_PREFIX) or k == DISTRIBUTION_MODE
+            if k.startswith(PROP_PREFIX) or k in {DISTRIBUTION_MODE, TABLE_COMMENT}
         }
         out[ident[-1]] = {
             "columns": [(f.name, str(f.field_type), f.required, f.doc) for f in schema.fields],
