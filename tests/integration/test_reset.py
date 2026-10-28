@@ -23,6 +23,7 @@ from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
 from saltation.config import DevConfig, EvolutionsConfig, SaltationConfig
 from saltation.errors import ExternalWriteDetectedError, IllegalStateError
+from saltation.migrate.commit import saltation_commit, saltation_uncommit
 from saltation.migrate.runner import (
     CURRENT_EVOLUTION_ID,
     apply_idempotent,
@@ -441,3 +442,20 @@ def test_reset_forgets_partition_fields_of_undone_edits(
     ]
     assert [s.spec_id for s in table.metadata.partition_specs] == [0]
     assert table.current_snapshot() is None
+
+
+def test_reset_after_uncommit_reapplies_the_popped_evolution(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    _write(current, f"CREATE TABLE IF NOT EXISTS {ns}.e0 (id BIGINT) USING iceberg;\n")
+    assert apply_reset(cfg).status == "applied"
+    saltation_commit(cfg, message="add e0")
+    saltation_uncommit(cfg)
+    assert not rest_catalog.table_exists((ns, "e0"))
+
+    assert apply_reset(cfg).status == "applied"
+    assert rest_catalog.table_exists((ns, "e0"))

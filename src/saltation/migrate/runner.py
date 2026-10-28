@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import getpass
 import socket
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -620,6 +620,9 @@ def _applied_and_standing(catalog: Catalog, namespace: str, evolution_hash: str)
     last = latest_event(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID)
     if last is None or last.evolution_hash != evolution_hash:
         return False
+    if not _in_cycle(catalog, namespace)(last):
+        # Applied before a commit or uncommit that has since moved the tables.
+        return False
     undo = latest_event(
         catalog, namespace, event_type="rollback", evolution_id=CURRENT_EVOLUTION_ID
     )
@@ -640,6 +643,17 @@ def _checkpoint_tag(evolution_id: str) -> str:
 _Baseline = dict[tuple[str, str], TableStateRow]
 
 
+def _in_cycle(catalog: Catalog, namespace: str) -> Callable[[Event | None], bool]:
+    """Whether an event belongs to the current dev cycle (since the last commit/uncommit)."""
+    boundaries = [
+        e.event_ts
+        for kind in ("commit", "uncommit")
+        if (e := latest_event(catalog, namespace, event_type=kind)) is not None
+    ]
+    start = max(boundaries, default=None)
+    return lambda event: event is not None and (start is None or event.event_ts > start)
+
+
 def _load_baseline(catalog: Catalog, namespace: str) -> _Baseline:
     """The baseline recorded by the last reset, completed from this cycle's applies.
 
@@ -647,21 +661,13 @@ def _load_baseline(catalog: Catalog, namespace: str) -> _Baseline:
     touched by one of those (before any reset, or by ``saltation apply``
     between resets) gets the pre-state of the earliest such apply.
     """
-    boundaries = [
-        e.event_ts
-        for kind in ("commit", "uncommit")
-        if (e := latest_event(catalog, namespace, event_type=kind)) is not None
-    ]
-    cycle_start = max(boundaries, default=None)
-
-    def in_cycle(event: Event) -> bool:
-        return cycle_start is None or event.event_ts > cycle_start
+    in_cycle = _in_cycle(catalog, namespace)
 
     baseline: _Baseline = {}
     checkpoint = latest_event(
         catalog, namespace, event_type="checkpoint", evolution_id=CURRENT_EVOLUTION_ID
     )
-    if checkpoint is not None and in_cycle(checkpoint):
+    if in_cycle(checkpoint) and checkpoint is not None:
         for r in table_states_for_event(catalog, namespace, event_id=checkpoint.event_id):
             baseline[(r.object_kind, r.table_ident)] = r
     for apply in events(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID):
@@ -904,11 +910,15 @@ def _expected_snapshots(
     catalog: Catalog, namespace: str, baseline: _Baseline
 ) -> dict[str, int | None]:
     """Where saltation last left each table's ``main``: the last apply, or a rollback after it."""
+    in_cycle = _in_cycle(catalog, namespace)
     last = latest_event(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID)
     undo = latest_event(
         catalog, namespace, event_type="rollback", evolution_id=CURRENT_EVOLUTION_ID
     )
-    if undo is not None and (last is None or undo.event_ts > last.event_ts):
+    if not in_cycle(last):
+        # A commit or uncommit since then put the tables where they are.
+        return {}
+    if in_cycle(undo) and undo is not None and last is not None and undo.event_ts > last.event_ts:
         return {
             ident: row.pre_snapshot_id
             for (kind, ident), row in baseline.items()
