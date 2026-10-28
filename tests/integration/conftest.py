@@ -57,16 +57,13 @@ def _wait_for_http_ok(url: str, timeout: float) -> None:
 def _bootstrap_completed(compose_cmd: list[str]) -> bool:
     """Return True iff the one-shot ``bootstrap`` container has exited 0."""
     result = subprocess.run(
-        [*compose_cmd, "ps", "-a", "--format", "{{.Service}} {{.ExitCode}}"],
+        [*compose_cmd, "ps", "-a", "--format", "{{.Service}} {{.State}} {{.ExitCode}}"],
         check=True,
         capture_output=True,
         text=True,
     )
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == "bootstrap" and parts[1] == "0":
-            return True
-    return False
+    # A running container also reports exit code 0.
+    return "bootstrap exited 0" in result.stdout.splitlines()
 
 
 def _wait_for_bootstrap(compose_cmd: list[str], timeout: float) -> None:

@@ -57,11 +57,18 @@ def replace_view(
     meta = view.metadata
     # Field ids must be unique across nested types too; create_view does this
     # itself, the raw commit doesn't.
-    schema_json = json.loads(assign_fresh_schema_ids(schema).model_dump_json(by_alias=True))
-    schema_json["schema-id"] = max(s.schema_id for s in meta.schemas) + 1
+    fresh = assign_fresh_schema_ids(schema)
+    updates: list[dict[str, Any]] = []
+    # Java catalogs dedupe an identical add-schema, which leaves -1 ("the
+    # schema added here") dangling, so an unchanged schema is referenced by id.
+    existing = next((s for s in meta.schemas if s.as_struct() == fresh.as_struct()), None)
+    if existing is None:
+        schema_json = json.loads(fresh.model_dump_json(by_alias=True))
+        schema_json["schema-id"] = max(s.schema_id for s in meta.schemas) + 1
+        updates.append({"action": "add-schema", "schema": schema_json})
     version = {
         "version-id": max(v.version_id for v in meta.versions) + 1,
-        "schema-id": -1,
+        "schema-id": -1 if existing is None else existing.schema_id,
         "timestamp-ms": int(time.time() * 1000),
         "summary": VIEW_SUMMARY,
         "representations": [
@@ -70,8 +77,7 @@ def replace_view(
         ],
         "default-namespace": list(default_namespace),
     }
-    updates: list[dict[str, Any]] = [
-        {"action": "add-schema", "schema": schema_json},
+    updates += [
         {"action": "add-view-version", "view-version": version},
         {"action": "set-current-view-version", "view-version-id": -1},
     ]

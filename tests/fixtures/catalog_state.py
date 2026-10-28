@@ -9,6 +9,7 @@ collection children), each rendered ``path:type[!][#doc][=default]`` where
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError, NoSuchViewError
@@ -57,7 +58,10 @@ def _field(path: str, f: NestedField) -> list[str]:
     return out
 
 
-def table_snapshot(catalog: Catalog, ident: Identifier) -> dict[str, Any] | None:
+def table_snapshot(
+    catalog: Catalog, ident: Identifier, catalog_defaults: Mapping[str, object] | None = None
+) -> dict[str, Any] | None:
+    """Leaves out ``catalog_defaults``, properties the catalog stamps on new tables."""
     try:
         table = catalog.load_table(ident)
     except NoSuchTableError:
@@ -80,7 +84,9 @@ def table_snapshot(catalog: Catalog, ident: Identifier) -> dict[str, Any] | None
             f"{s.null_order.value}"
             for s in table.sort_order().fields
         ],
-        "props": dict(table.properties),
+        "props": {
+            k: v for k, v in table.properties.items() if (catalog_defaults or {}).get(k) != v
+        },
         "loc": table.location(),
         "rows": int(snap.summary["total-records"]) if snap and snap.summary else 0,
     }

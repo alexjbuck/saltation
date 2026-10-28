@@ -83,7 +83,7 @@ def _snapshot(catalog: RestCatalog, target: str) -> Any:
     ident = tuple(name.rsplit(".", 1))
     if kind == "view":
         return view_snapshot(catalog, ident)
-    return table_snapshot(catalog, ident)
+    return table_snapshot(catalog, ident, RIG.table_defaults)
 
 
 def _snapshots(catalog: RestCatalog, targets: list[str]) -> dict[str, Any]:

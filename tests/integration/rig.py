@@ -17,6 +17,7 @@ from typing import Any
 from pyiceberg.catalog.rest import RestCatalog
 
 from cambrian.config import CatalogConfig
+from tests.fixtures.catalog_state import ANY
 
 __all__ = ["RIG", "Rig", "catalog_config", "catalog_properties", "catalog_toml", "rest_catalog"]
 
@@ -40,6 +41,8 @@ class Rig:
     # Where the catalog lets a client put an explicit table location.
     location_root: str
     properties: dict[str, Any] = field(default_factory=dict)
+    # Properties the catalog stamps on every new table (ANY: whatever value).
+    table_defaults: dict[str, object] = field(default_factory=dict)
 
 
 RIGS = {
@@ -58,6 +61,7 @@ RIGS = {
         # PyIceberg 0.12 sends "Authorization: Bearer None" without an auth
         # config; Gravitino rejects it where Lakekeeper ignores it.
         properties={"uri": "http://localhost:8181/iceberg", "auth": {"type": "noop"}, **_S3},
+        table_defaults={"write.parquet.compression-codec": "zstd"},
     ),
     "polaris": Rig(
         name="polaris",
@@ -74,6 +78,7 @@ RIGS = {
             "header.X-Iceberg-Access-Delegation": "",
             **_S3,
         },
+        table_defaults={"write.parquet.compression-codec": "zstd", "created-at": ANY},
     ),
 }
 

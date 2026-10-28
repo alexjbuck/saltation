@@ -96,6 +96,9 @@ services:
       # PyIceberg's purge_table / DROP TABLE ... PURGE is rejected with 403
       # unless this is on.
       polaris.features."DROP_WITH_PURGE_ENABLED": "true"
+      # By default a table may only move within its own location tree; the
+      # corpus moves one to a sibling path (ALTER TABLE ... SET LOCATION).
+      polaris.features."ALLOW_UNSTRUCTURED_TABLE_LOCATION": "true"
     healthcheck:
       # Quarkus management interface (health) is on 8182, API on 8181.
       test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]

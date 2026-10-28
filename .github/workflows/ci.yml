@@ -116,8 +116,8 @@ jobs:
           for _ in $(seq 1 60); do
             if curl -fsS http://localhost:8181/health >/dev/null 2>&1 \
               && docker compose -f docker/compose.yml ps -a \
-                  --format '{{.Service}} {{.ExitCode}}' \
-                  | grep -q '^bootstrap 0$'; then
+                  --format '{{.Service}} {{.State}} {{.ExitCode}}' \
+                  | grep -q '^bootstrap exited 0$'; then
               break
             fi
             sleep 2

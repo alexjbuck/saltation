@@ -118,6 +118,9 @@ V3 = "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')"
 # Lakekeeper rejects even a bare "geometry" schema type (HTTP 422). PyIceberg
 # 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none.
 _NO_GEO = "Lakekeeper (v0.14.2) can't deserialize geometry/geography schema types"
+# PyIceberg quotes the CRS/algorithm ("geography('OGC:CRS84', 'vincenty')"),
+# which Iceberg Java's type parser rejects.
+_QUOTED_GEO = "Iceberg Java can't parse PyIceberg's quoted geography params"
 
 
 # Views store one SQL text per dialect; the effect tests store two so the
@@ -452,7 +455,7 @@ EFFECTS: dict[str, Effect] = {
     # --- format v3 ------------------------------------------------------------
     "ct_time": t(created(["t:time"]), base="ns"),
     "ct_v3_geo_types": t(
-        catalog_refuses={"lakekeeper": _NO_GEO},
+        catalog_refuses={"lakekeeper": _NO_GEO, "gravitino": _QUOTED_GEO, "polaris": _QUOTED_GEO},
         effect=created(
             [
                 "g:geometry",
