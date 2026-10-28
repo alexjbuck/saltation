@@ -1,0 +1,467 @@
+"""Hypothesis strategies that generate valid evolution scripts plus their expected end state.
+
+The generator walks a small in-memory model of each table and only emits
+statements that are legal against the model at that point in the script, so a
+dispatch error on a *fresh* apply is a cambrian bug, not a generator artefact.
+The model's :meth:`TableModel.fingerprint` uses the same shape as
+:func:`catalog_fingerprint`, so tests can compare live catalog state against
+the model (correctness) as well as against itself after a re-apply
+(idempotency).
+
+Scripts are rendered with a ``{ns}`` placeholder so one generated script can be
+applied into several isolated namespaces.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+import sqlglot
+from hypothesis import strategies as st
+
+from cambrian.sql.dialect import CambrianSpark
+from cambrian.sql.dispatch import dispatch
+
+if TYPE_CHECKING:
+    from pyiceberg.catalog import Catalog
+
+__all__ = [
+    "ColType",
+    "EvolutionScript",
+    "Features",
+    "TableModel",
+    "apply_script",
+    "catalog_fingerprint",
+    "evolution_scripts",
+]
+
+PROP_PREFIX = "cambrian.p."
+DISTRIBUTION_MODE = "write.distribution-mode"
+
+
+@dataclass(frozen=True)
+class ColType:
+    sql: str
+    iceberg: str
+    family: str
+
+
+INT = ColType("INT", "int", "int")
+BIGINT = ColType("BIGINT", "long", "long")
+FLOAT = ColType("FLOAT", "float", "float")
+DOUBLE = ColType("DOUBLE", "double", "double")
+STRING = ColType("STRING", "string", "string")
+BOOLEAN = ColType("BOOLEAN", "boolean", "boolean")
+DATE = ColType("DATE", "date", "date")
+TS_NTZ = ColType("TIMESTAMP_NTZ", "timestamp", "ts")
+TS_TZ = ColType("TIMESTAMP", "timestamptz", "ts")
+BINARY = ColType("BINARY", "binary", "binary")
+
+
+def _decimal(precision: int, scale: int) -> ColType:
+    return ColType(f"DECIMAL({precision}, {scale})", f"decimal({precision}, {scale})", "decimal")
+
+
+PRIMITIVES: tuple[ColType, ...] = (
+    INT,
+    BIGINT,
+    FLOAT,
+    DOUBLE,
+    STRING,
+    BOOLEAN,
+    DATE,
+    TS_NTZ,
+    TS_TZ,
+    BINARY,
+    _decimal(10, 2),
+    _decimal(18, 4),
+)
+
+
+def _widenings(t: ColType) -> list[ColType]:
+    if t == INT:
+        return [BIGINT]
+    if t == FLOAT:
+        return [DOUBLE]
+    if t.family == "decimal":
+        p, s = (int(x) for x in t.iceberg[len("decimal(") : -1].split(", "))
+        return [_decimal(np, s) for np in (p + 2, 38) if np <= 38 and np > p]
+    return []
+
+
+# (sql template, iceberg transform string) per column family. Identity on
+# float/double is legal Iceberg but useless and rejected by some engines.
+def _transforms(t: ColType) -> list[tuple[str, str]]:
+    fam = t.family
+    out: list[tuple[str, str]] = []
+    if fam in {"int", "long", "string", "date", "boolean", "decimal", "ts"}:
+        out.append(("{c}", "identity"))
+    if fam in {"int", "long", "string", "date", "ts", "decimal", "binary"}:
+        out += [("bucket(4, {c})", "bucket[4]"), ("bucket(16, {c})", "bucket[16]")]
+    if fam in {"int", "long", "string", "decimal", "binary"}:
+        out.append(("truncate(8, {c})", "truncate[8]"))
+    if fam in {"date", "ts"}:
+        out += [("year({c})", "year"), ("month({c})", "month"), ("day({c})", "day")]
+    if fam == "ts":
+        out.append(("hour({c})", "hour"))
+    return out
+
+
+_TIME_TRANSFORMS = {"year", "month", "day", "hour"}
+
+
+@dataclass
+class Column:
+    name: str
+    type: ColType
+    required: bool = False
+    doc: str | None = None
+
+
+@dataclass
+class PartitionField:
+    source: str
+    transform: str
+    sql: str
+
+
+@dataclass
+class TableModel:
+    name: str
+    columns: list[Column] = field(default_factory=list)
+    partition: list[PartitionField] = field(default_factory=list)
+    sort: list[tuple[str, str]] = field(default_factory=list)
+    props: dict[str, str] = field(default_factory=dict)
+    identifier: set[str] = field(default_factory=set)
+    # Columns ever referenced by a partition field or sort order. Iceberg keeps
+    # old specs/orders around and refuses to drop their source columns, so the
+    # generator never drops these.
+    pinned: set[str] = field(default_factory=set)
+    # Columns an ALTER has referenced. Dropping one later makes the script
+    # non-replayable (the ALTER hits a missing column on re-apply).
+    altered: set[str] = field(default_factory=set)
+    ever_identifier: set[str] = field(default_factory=set)
+    reordered: bool = False
+    next_col: int = 0
+
+    def droppable(self, features: Features) -> list[Column]:
+        blocked = self.pinned | self.identifier
+        if not features.drop_after_alter:
+            blocked |= self.altered
+        return [c for c in self.columns if c.name not in blocked]
+
+    def col(self, name: str) -> Column:
+        return next(c for c in self.columns if c.name == name)
+
+    def fresh_name(self) -> str:
+        name = f"c{self.next_col}"
+        self.next_col += 1
+        return name
+
+    def fingerprint(self) -> dict[str, Any]:
+        return {
+            "columns": [(c.name, c.type.iceberg, c.required, c.doc) for c in self.columns],
+            "partition": [(p.source, p.transform) for p in self.partition],
+            "sort": list(self.sort),
+            "props": dict(sorted(self.props.items())),
+            "identifier": sorted(self.identifier),
+        }
+
+
+@dataclass(frozen=True)
+class Features:
+    """Toggles for statement kinds. Off-by-default entries are known gaps."""
+
+    column_comments_on_add: bool = True
+    column_comments_on_create: bool = True
+    drop_column: bool = True
+    # The three flags below generate scripts where a later statement breaks an
+    # earlier one's precondition, so the script can't be replayed. Per the
+    # core principle that is reset-mode territory, not an idempotency bug.
+    drop_after_alter: bool = False
+    relax_former_identifier: bool = False
+    multiple_reorders: bool = False
+    alter_type: bool = True
+    alter_comment: bool = True
+    alter_nullability: bool = True
+    reorder: bool = True
+    partition: bool = True
+    sort: bool = True
+    props: bool = True
+    unset_props: bool = False
+    identifier: bool = True
+    max_tables: int = 2
+
+
+@dataclass
+class EvolutionScript:
+    statements: list[str]
+    expected: dict[str, dict[str, Any]]
+
+    def render(self, ns: str, upto: int | None = None) -> str:
+        stmts = self.statements if upto is None else self.statements[:upto]
+        return "\n".join(s.format(ns=ns) for s in stmts)
+
+    def __repr__(self) -> str:
+        body = "\n  ".join(self.statements)
+        return f"EvolutionScript(\n  {body}\n)"
+
+
+# (Spark SQL literal body, decoded doc). Spark escapes quotes with a backslash;
+# the ANSI/Trino doubled quote ('') does not parse in CambrianSpark.
+_DOCS = st.sampled_from(
+    [
+        ("first", "first"),
+        ("second doc", "second doc"),
+        ("it\\'s quoted", "it's quoted"),
+        ("unit: m/s", "unit: m/s"),
+    ]
+)
+_PROP_KEYS = st.sampled_from([f"{PROP_PREFIX}k{i}" for i in range(4)])
+_PROP_VALS = st.sampled_from(["a", "b", "1", "true"])
+
+
+def _q(ns_table: str) -> str:
+    return "{ns}." + ns_table
+
+
+@st.composite
+def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableModel]:
+    t = TableModel(name=name)
+    n = draw(st.integers(min_value=1, max_value=5))
+    defs: list[str] = []
+    for _ in range(n):
+        ctype = draw(st.sampled_from(PRIMITIVES))
+        col = Column(t.fresh_name(), ctype, required=draw(st.booleans()))
+        d = f"{col.name} {ctype.sql}"
+        if col.required:
+            d += " NOT NULL"
+        if features.column_comments_on_create and draw(st.booleans()):
+            lit, col.doc = draw(_DOCS)
+            d += f" COMMENT '{lit}'"
+        t.columns.append(col)
+        defs.append(d)
+    sql = f"CREATE TABLE IF NOT EXISTS {_q(name)} ({', '.join(defs)}) USING iceberg;"
+    return sql, t
+
+
+def _candidates(t: TableModel, features: Features) -> list[str]:
+    kinds = ["add_column"]
+    if features.drop_column and t.droppable(features) and len(t.columns) > 1:
+        kinds.append("drop_column")
+    if features.alter_type and any(_widenings(c.type) for c in t.columns):
+        kinds.append("alter_type")
+    if features.alter_comment:
+        kinds.append("alter_comment")
+    if features.alter_nullability:
+        kinds.append("nullability")
+    if features.reorder and len(t.columns) > 1 and (features.multiple_reorders or not t.reordered):
+        kinds.append("reorder")
+    if features.partition:
+        kinds.append("add_partition")
+        if t.partition:
+            kinds.append("drop_partition")
+    if features.sort:
+        kinds.append("sort")
+    if features.props:
+        kinds.append("set_props")
+    if features.unset_props:
+        kinds.append("unset_props")
+    if features.identifier:
+        kinds.append("identifier")
+    return kinds
+
+
+@st.composite
+def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
+    """Emit one ALTER against *t* and mutate the model; None means 'skip'."""
+    kind = draw(st.sampled_from(_candidates(t, features)))
+    tbl = _q(t.name)
+
+    if kind == "add_column":
+        ctype = draw(st.sampled_from(PRIMITIVES))
+        col = Column(t.fresh_name(), ctype)
+        sql = f"ALTER TABLE {tbl} ADD COLUMN {col.name} {ctype.sql}"
+        if features.column_comments_on_add and draw(st.booleans()):
+            lit, col.doc = draw(_DOCS)
+            sql += f" COMMENT '{lit}'"
+        t.columns.append(col)
+        return sql + ";"
+
+    if kind == "drop_column":
+        col = draw(st.sampled_from(t.droppable(features)))
+        t.columns.remove(col)
+        return f"ALTER TABLE {tbl} DROP COLUMN {col.name};"
+
+    if kind == "alter_type":
+        col = draw(st.sampled_from([c for c in t.columns if _widenings(c.type)]))
+        new = draw(st.sampled_from(_widenings(col.type)))
+        col.type = new
+        t.altered.add(col.name)
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} TYPE {new.sql};"
+
+    if kind == "alter_comment":
+        col = draw(st.sampled_from(t.columns))
+        lit, col.doc = draw(_DOCS)
+        t.altered.add(col.name)
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} COMMENT '{lit}';"
+
+    if kind == "nullability":
+        col = draw(st.sampled_from(t.columns))
+        t.altered.add(col.name)
+        if col.required:
+            if col.name in t.identifier:
+                return None
+            if col.name in t.ever_identifier and not features.relax_former_identifier:
+                return None
+            col.required = False
+            return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} DROP NOT NULL;"
+        col.required = True
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} SET NOT NULL;"
+
+    if kind == "reorder":
+        col = draw(st.sampled_from(t.columns))
+        others = [c for c in t.columns if c is not col]
+        t.columns.remove(col)
+        t.altered.add(col.name)
+        t.reordered = True
+        if draw(st.booleans()):
+            t.columns.insert(0, col)
+            return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} FIRST;"
+        anchor = draw(st.sampled_from(others))
+        t.altered.add(anchor.name)
+        t.columns.insert(t.columns.index(anchor) + 1, col)
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} AFTER {anchor.name};"
+
+    if kind == "add_partition":
+        options: list[tuple[Column, str, str]] = []
+        for c in t.columns:
+            used = {(p.source, p.transform) for p in t.partition}
+            has_time = any(
+                p.source == c.name and p.transform in _TIME_TRANSFORMS for p in t.partition
+            )
+            for tmpl, tr in _transforms(c.type):
+                if (c.name, tr) in used or (tr in _TIME_TRANSFORMS and has_time):
+                    continue
+                options.append((c, tmpl.format(c=c.name), tr))
+        if not options:
+            return None
+        col, expr, tr = draw(st.sampled_from(options))
+        t.partition.append(PartitionField(col.name, tr, expr))
+        t.pinned.add(col.name)
+        return f"ALTER TABLE {tbl} ADD PARTITION FIELD {expr};"
+
+    if kind == "drop_partition":
+        pf = draw(st.sampled_from(t.partition))
+        t.partition.remove(pf)
+        return f"ALTER TABLE {tbl} DROP PARTITION FIELD {pf.sql};"
+
+    if kind == "sort":
+        cols = draw(st.lists(st.sampled_from(t.columns), min_size=1, max_size=3, unique_by=id))
+        parts: list[str] = []
+        order: list[tuple[str, str]] = []
+        for c in cols:
+            desc = draw(st.booleans())
+            parts.append(f"{c.name} DESC" if desc else c.name)
+            order.append((c.name, "desc" if desc else "asc"))
+            t.pinned.add(c.name)
+        t.sort = order
+        t.props[DISTRIBUTION_MODE] = "range"
+        return f"ALTER TABLE {tbl} WRITE ORDERED BY {', '.join(parts)};"
+
+    if kind == "set_props":
+        kv = draw(st.dictionaries(_PROP_KEYS, _PROP_VALS, min_size=1, max_size=3))
+        t.props.update(kv)
+        body = ", ".join(f"'{k}'='{v}'" for k, v in kv.items())
+        return f"ALTER TABLE {tbl} SET TBLPROPERTIES ({body});"
+
+    if kind == "unset_props":
+        keys = draw(st.lists(_PROP_KEYS, min_size=1, max_size=2, unique=True))
+        for k in keys:
+            t.props.pop(k, None)
+        return f"ALTER TABLE {tbl} UNSET TBLPROPERTIES ({', '.join(repr(k) for k in keys)});"
+
+    if kind == "identifier":
+        eligible = [c for c in t.columns if c.required and c.type.family not in {"float", "double"}]
+        if t.identifier and draw(st.booleans()):
+            drop = draw(st.sampled_from(sorted(t.identifier)))
+            t.identifier.discard(drop)
+            t.altered.add(drop)
+            return f"ALTER TABLE {tbl} DROP IDENTIFIER FIELDS {drop};"
+        if not eligible:
+            return None
+        chosen = draw(st.lists(st.sampled_from(eligible), min_size=1, max_size=2, unique_by=id))
+        t.identifier = {c.name for c in chosen}
+        t.altered |= t.identifier
+        t.ever_identifier |= t.identifier
+        return f"ALTER TABLE {tbl} SET IDENTIFIER FIELDS {', '.join(c.name for c in chosen)};"
+
+    raise AssertionError(kind)
+
+
+@st.composite
+def evolution_scripts(
+    draw: st.DrawFn,
+    features: Features = Features(),
+    min_steps: int = 1,
+    max_steps: int = 15,
+) -> EvolutionScript:
+    statements = ["CREATE NAMESPACE IF NOT EXISTS {ns};"]
+    tables: dict[str, TableModel] = {}
+    n_tables = draw(st.integers(min_value=1, max_value=features.max_tables))
+    for i in range(n_tables):
+        sql, model = draw(_create(f"t{i}", features))
+        statements.append(sql)
+        tables[model.name] = model
+
+    n_steps = draw(st.integers(min_value=min_steps, max_value=max_steps))
+    for _ in range(n_steps):
+        t = tables[draw(st.sampled_from(sorted(tables)))]
+        snapshot = copy.deepcopy(t)
+        stmt = draw(_step(t, features))
+        if stmt is None:
+            tables[t.name] = snapshot
+            continue
+        statements.append(stmt)
+
+    return EvolutionScript(
+        statements=statements,
+        expected={name: m.fingerprint() for name, m in sorted(tables.items())},
+    )
+
+
+def apply_script(catalog: Catalog, sql: str) -> None:
+    """Parse and dispatch *sql* statement-by-statement, mirroring the runner loop."""
+    for stmt in sqlglot.parse(sql, dialect=CambrianSpark):
+        if stmt is not None:
+            dispatch(catalog, stmt)
+
+
+def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str, Any]]:
+    """Read every table in *namespace* into the same shape as ``TableModel.fingerprint``."""
+    out: dict[str, dict[str, Any]] = {}
+    for ident in sorted(catalog.list_tables(namespace)):
+        table = catalog.load_table(ident)
+        schema = table.schema()
+        names = {f.field_id: f.name for f in schema.fields}
+        props = {
+            k: v
+            for k, v in table.properties.items()
+            if k.startswith(PROP_PREFIX) or k == DISTRIBUTION_MODE
+        }
+        out[ident[-1]] = {
+            "columns": [(f.name, str(f.field_type), f.required, f.doc) for f in schema.fields],
+            "partition": [
+                (names.get(pf.source_id, f"<dropped:{pf.source_id}>"), str(pf.transform))
+                for pf in table.spec().fields
+            ],
+            "sort": [
+                (names.get(sf.source_id, f"<dropped:{sf.source_id}>"), str(sf.direction.value))
+                for sf in table.sort_order().fields
+            ],
+            "props": dict(sorted(props.items())),
+            "identifier": sorted(schema.identifier_field_names()),
+        }
+    return out

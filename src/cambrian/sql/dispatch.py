@@ -31,9 +31,10 @@ from pyiceberg.exceptions import (
     NamespaceAlreadyExistsError,
     NoSuchNamespaceError,
     NoSuchTableError,
+    ResolveError,
     TableAlreadyExistsError,
 )
-from pyiceberg.schema import Schema
+from pyiceberg.schema import Schema, promote
 from pyiceberg.transforms import (
     BucketTransform,
     DayTransform,
@@ -475,7 +476,7 @@ def _add_column(table: Table, col_def: exp.ColumnDef) -> str:
     # (required=False) so re-applies don't fight a NULL existing row.
     try:
         with table.update_schema() as us:
-            us.add_column(path, dtype, required=False)
+            us.add_column(path, dtype, doc=_column_comment(col_def), required=False)
     except ValueError as err:
         # PyIceberg raises a ValueError on duplicate add. Idempotent contract.
         if "already exists" in str(err).lower() or "duplicate" in str(err).lower():
@@ -492,43 +493,37 @@ def _drop_column(table: Table, action: exp.Drop) -> str:
     # exp.Schema (plural with parens).
     kind = (action.args.get("kind") or "").upper()
     if kind == "COLUMNS" and isinstance(inner, exp.Schema):
-        notes: list[str] = []
-        for col in inner.args.get("expressions") or []:
-            name = col.name
-            try:
-                with table.update_schema() as us:
-                    us.delete_column(name)
-                notes.append(f"drop column {name}")
-            except ValueError as err:
-                if "not found" in str(err).lower():
-                    notes.append(f"drop column {name}: already absent (idempotent)")
-                else:
-                    raise
-        return ", ".join(notes)
-    # Singular form: ``DROP COLUMN c``.
-    name = inner.name
-    try:
+        names = [col.name for col in inner.args.get("expressions") or []]
+    else:
+        names = [inner.name]
+    notes: list[str] = []
+    for name in names:
+        if not _has_field(table, name):
+            notes.append(f"drop column {name}: already absent (idempotent)")
+            continue
         with table.update_schema() as us:
             us.delete_column(name)
-    except ValueError as err:
-        if "not found" in str(err).lower() or "does not exist" in str(err).lower():
-            return f"drop column {name}: already absent (idempotent)"
-        raise
-    return f"drop column {name}"
+        notes.append(f"drop column {name}")
+    return ", ".join(notes)
+
+
+def _has_field(table: Table, name: str) -> bool:
+    # Decide idempotent no-ops from table state, not PyIceberg error text:
+    # the messages aren't API and have already drifted out from under us.
+    try:
+        table.schema().find_field(name)
+    except ValueError:
+        return False
+    return True
 
 
 def _rename_column(table: Table, action: exp.RenameColumn) -> str:
     old = action.args["this"].name
     new = action.args["to"].name
-    try:
-        with table.update_schema() as us:
-            us.rename_column(old, new)
-    except ValueError as err:
-        # If old name is already absent and new exists, consider it idempotent.
-        msg = str(err).lower()
-        if "not found" in msg or "does not exist" in msg:
-            return f"rename column {old} -> {new}: source already absent (idempotent)"
-        raise
+    if not _has_field(table, old) and _has_field(table, new):
+        return f"rename column {old} -> {new}: source already absent (idempotent)"
+    with table.update_schema() as us:
+        us.rename_column(old, new)
     return f"rename column {old} -> {new}"
 
 
@@ -546,7 +541,14 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
     notes: list[str] = []
     if dtype_node is not None:
         field_type = _iceberg_type_from_sqlglot(dtype_node)
-        notes.append(f"type -> {field_type}")
+        if _already_widened(table, name, field_type):
+            # Re-applying an earlier widening step (decimal(10,2) -> (12,2)
+            # after a later -> (14,2)) would be a narrowing; the column
+            # already satisfies "at least this wide", so leave the type alone.
+            notes.append(f"type -> {field_type}: already wider (idempotent)")
+            field_type = None
+        else:
+            notes.append(f"type -> {field_type}")
     if comment_node is not None:
         doc = _scalar(comment_node)
         notes.append("comment")
@@ -570,9 +572,24 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
     # the change and leaves data correctness to the user, so opt into the
     # incompatible change only when we're tightening (required is True).
     allow_incompatible = required is True
-    with table.update_schema(allow_incompatible_changes=allow_incompatible) as us:
-        us.update_column(name, field_type=field_type, required=required, doc=doc)
+    if field_type is not None or required is not None or doc is not None:
+        with table.update_schema(allow_incompatible_changes=allow_incompatible) as us:
+            us.update_column(name, field_type=field_type, required=required, doc=doc)
     return f"alter column {name} ({', '.join(notes)})"
+
+
+def _already_widened(table: Table, name: str, requested: IcebergType) -> bool:
+    try:
+        current = table.schema().find_field(name).field_type
+    except ValueError:
+        return False
+    if current == requested:
+        return False
+    try:
+        promote(requested, current)
+    except ResolveError:
+        return False
+    return True
 
 
 def _alter_column_position(table: Table, action: AlterColumnPosition) -> str:
@@ -666,17 +683,12 @@ def _unset_tblproperties(table: Table, action: UnsetTblProperties) -> str:
             keys.append(rendered)
     if not keys:
         return "unset tblproperties: (no keys parsed)"
-    try:
-        with table.transaction() as txn:
-            txn.remove_properties(*keys)
-    except (KeyError, ValueError) as err:
-        # PyIceberg raises if the key isn't present. Treat as idempotent —
-        # the user asked for the absence; we're delivering it.
-        msg = str(err).lower()
-        if "not found" in msg or "does not exist" in msg or "missing" in msg:
-            return f"unset tblproperties {sorted(keys)}: already absent (idempotent)"
-        raise
-    return f"unset tblproperties {sorted(keys)}"
+    present = [k for k in keys if k in table.properties]
+    if not present:
+        return f"unset tblproperties {sorted(keys)}: already absent (idempotent)"
+    with table.transaction() as txn:
+        txn.remove_properties(*present)
+    return f"unset tblproperties {sorted(present)}"
 
 
 def _scalar(node: exp.Expression | None) -> str | None:
@@ -1198,10 +1210,22 @@ def _build_iceberg_schema(column_defs: list[exp.Expression]) -> Schema:
         required = _is_required(node)
         fields.append(
             NestedField(
-                field_id=field_id, name=node.name, field_type=iceberg_type, required=required
+                field_id=field_id,
+                name=node.name,
+                field_type=iceberg_type,
+                required=required,
+                doc=_column_comment(node),
             )
         )
     return Schema(*fields)
+
+
+def _column_comment(col_def: exp.ColumnDef) -> str | None:
+    for constraint in col_def.args.get("constraints") or []:
+        kind = constraint.args.get("kind") if isinstance(constraint, exp.Expression) else None
+        if isinstance(kind, exp.CommentColumnConstraint):
+            return _scalar(kind.this)
+    return None
 
 
 def _is_required(col_def: exp.ColumnDef) -> bool:

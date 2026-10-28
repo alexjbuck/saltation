@@ -267,11 +267,28 @@ def test_alter_drop_column_idempotent_when_absent() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
-    table.update_schema.return_value.__enter__.return_value.delete_column.side_effect = ValueError(
-        "Column not found in schema: c"
+    table.schema.return_value.find_field.side_effect = ValueError(
+        "Could not find field with name c, case_sensitive=True"
     )
     result = dispatch(catalog, _single("ALTER TABLE foo.t DROP COLUMN c"))
     assert "already absent" in result.notes
+    table.update_schema.assert_not_called()
+
+
+def test_alter_rename_column_idempotent_when_already_renamed() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+
+    def find_field(name: str) -> object:
+        if name == "a":
+            raise ValueError("Could not find field with name a, case_sensitive=True")
+        return MagicMock()
+
+    table.schema.return_value.find_field.side_effect = find_field
+    result = dispatch(catalog, _single("ALTER TABLE foo.t RENAME COLUMN a TO b"))
+    assert "already absent" in result.notes
+    table.update_schema.assert_not_called()
 
 
 def test_alter_rename_column() -> None:
@@ -315,9 +332,30 @@ def test_unset_tblproperties() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.properties = {"k1": "a", "k2": "b"}
     dispatch(catalog, _single('ALTER TABLE foo.t UNSET TBLPROPERTIES ("k1", "k2")'))
     txn = table.transaction.return_value.__enter__.return_value
     txn.remove_properties.assert_called_once_with("k1", "k2")
+
+
+def test_unset_tblproperties_skips_absent_keys() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.properties = {"k2": "b"}
+    dispatch(catalog, _single('ALTER TABLE foo.t UNSET TBLPROPERTIES ("k1", "k2")'))
+    txn = table.transaction.return_value.__enter__.return_value
+    txn.remove_properties.assert_called_once_with("k2")
+
+
+def test_unset_tblproperties_all_absent_is_noop() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.properties = {}
+    result = dispatch(catalog, _single('ALTER TABLE foo.t UNSET TBLPROPERTIES ("k1")'))
+    assert "already absent" in result.notes
+    table.transaction.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -846,3 +884,33 @@ def test_alter_namespace_set_properties() -> None:
     catalog = _make_catalog()
     dispatch(catalog, _single("ALTER NAMESPACE foo SET PROPERTIES ('owner' = 'data')"))
     catalog.update_namespace_properties.assert_called_once_with("foo", updates={"owner": "data"})
+
+
+def test_alter_column_type_already_wider_is_noop() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.schema.return_value.find_field.return_value = MagicMock(
+        field_type=DecimalType(precision=14, scale=2)
+    )
+    result = dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN d TYPE DECIMAL(12, 2)"))
+    assert "already wider" in result.notes
+    table.update_schema.assert_not_called()
+
+
+def test_alter_add_column_carries_comment() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN c INT COMMENT 'unit: m/s'"))
+    us = table.update_schema.return_value.__enter__.return_value
+    assert us.add_column.call_args.kwargs["doc"] == "unit: m/s"
+
+
+def test_create_table_carries_column_comments() -> None:
+    catalog = _make_catalog()
+    sql = "CREATE TABLE foo.t (a INT COMMENT 'the a', b STRING NOT NULL) USING iceberg"
+    dispatch(catalog, _single(sql))
+    schema = catalog.create_table.call_args.kwargs["schema"]
+    assert [f.doc for f in schema.fields] == ["the a", None]
+    assert [f.required for f in schema.fields] == [False, True]
