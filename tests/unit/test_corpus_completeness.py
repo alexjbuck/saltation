@@ -83,6 +83,7 @@ _PRIMITIVE_TYPE_COVERAGE: dict[exp.DataType.Type, tuple[str, ...]] = {
     exp.DataType.Type.TIMESTAMPNTZ: ("ct_all_primitives",),
     exp.DataType.Type.TIMESTAMPTZ: ("ct_timestamptz_alias",),
     exp.DataType.Type.TIMESTAMPLTZ: ("ct_timestamptz_alias",),
+    exp.DataType.Type.TIME: ("ct_time",),
 }
 
 # DECIMAL + the composites are handled by explicit branches in
@@ -92,6 +93,8 @@ _COMPOSITE_TYPE_COVERAGE: dict[str, tuple[str, ...]] = {
     "STRUCT": ("ct_struct", "ct_nested_combo"),
     "ARRAY": ("ct_array", "ct_nested_combo"),
     "MAP": ("ct_map", "ct_nested_combo"),
+    "GEOMETRY": ("ct_v3_geo_types", "add_column_geometry_v3"),
+    "GEOGRAPHY": ("ct_v3_geo_types",),
 }
 
 

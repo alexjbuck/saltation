@@ -893,6 +893,125 @@ CORPUS: list[CorpusEntry] = [
         "Spark CREATE NAMESPACE clauses; comment is stored as the 'comment' property.",
     ),
     # =====================================================================
+    # Iceberg format v3 DDL
+    # =====================================================================
+    CorpusEntry(
+        "ct_time",
+        "create_table",
+        "CREATE TABLE foo.t (t TIME) USING iceberg",
+        "apply",
+        "Spark 4.1 TIME -> Iceberg time.",
+    ),
+    CorpusEntry(
+        "ct_v3_geo_types",
+        "create_table_v3",
+        "CREATE TABLE foo.t (g GEOMETRY, g2 GEOMETRY(4326), gg GEOGRAPHY, "
+        "gg2 GEOGRAPHY('OGC:CRS84', 'vincenty')) USING iceberg "
+        "TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "Spec v3 geometry(C) / geography(C, A).",
+    ),
+    CorpusEntry(
+        "ct_v3_partitioned",
+        "create_table_v3",
+        "CREATE TABLE foo.t (id BIGINT, ts TIMESTAMP) USING iceberg "
+        "PARTITIONED BY (bucket(8, id), days(ts)) TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "Partitioned v3 table created in a single request.",
+    ),
+    CorpusEntry(
+        "ct_v3_geo_on_v2",
+        "create_table_v3",
+        "CREATE TABLE foo.t (g GEOMETRY) USING iceberg",
+        "invalid",
+        "geometry is a v3 type; a v2 table can't hold it.",
+    ),
+    CorpusEntry(
+        "ct_v3_default",
+        "create_table_v3",
+        "CREATE TABLE foo.t (id BIGINT, status STRING DEFAULT 'new') USING iceberg "
+        "TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "Spec v3 default values; a create-time DEFAULT is the write-default.",
+    ),
+    CorpusEntry(
+        "ct_default_on_v2",
+        "create_table_v3",
+        "CREATE TABLE foo.t (id BIGINT DEFAULT 0) USING iceberg",
+        "invalid",
+        "Default values are a v3 feature.",
+    ),
+    CorpusEntry(
+        "ct_variant",
+        "create_table_v3",
+        "CREATE TABLE foo.t (v VARIANT) USING iceberg TBLPROPERTIES ('format-version' = '3')",
+        "reject",
+        "Spec v3 variant; PyIceberg has no variant type yet, so cambrian refuses it.",
+    ),
+    CorpusEntry(
+        "upgrade_format_v3",
+        "table_properties_v3",
+        "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "format-version is reserved; maps to the REST upgrade-format-version update.",
+    ),
+    CorpusEntry(
+        "downgrade_format",
+        "table_properties_v3",
+        "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '2')",
+        "invalid",
+        "The spec only allows format upgrades.",
+    ),
+    CorpusEntry(
+        "add_column_default_v3",
+        "schema_add_v3",
+        "ALTER TABLE foo.t ADD COLUMN c INT DEFAULT 5",
+        "apply",
+        "Spec v3: initial-default and write-default both set on add.",
+    ),
+    CorpusEntry(
+        "add_column_not_null_default_v3",
+        "schema_add_v3",
+        "ALTER TABLE foo.t ADD COLUMN c INT NOT NULL DEFAULT 5",
+        "apply",
+        "A required column can be added once a default fills existing rows.",
+    ),
+    CorpusEntry(
+        "add_column_geometry_v3",
+        "schema_add_v3",
+        "ALTER TABLE foo.t ADD COLUMN g GEOMETRY",
+        "apply",
+        "Spec v3 geometry added to an upgraded table.",
+    ),
+    CorpusEntry(
+        "alter_column_set_default",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN c SET DEFAULT 7",
+        "apply",
+        "Changes the write-default only.",
+    ),
+    CorpusEntry(
+        "alter_column_drop_default",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN c DROP DEFAULT",
+        "apply",
+        "Clears the write-default.",
+    ),
+    CorpusEntry(
+        "promote_date_to_timestamp",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN d TYPE TIMESTAMP_NTZ",
+        "apply",
+        "Spec v3 type promotion date -> timestamp.",
+    ),
+    CorpusEntry(
+        "promote_date_bucketed",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN d TYPE TIMESTAMP_NTZ",
+        "invalid",
+        "Spec: promotion is refused when a partition transform (bucket) would change values.",
+    ),
+    # =====================================================================
     # NEGATIVE — out-of-scope writes
     # =====================================================================
     CorpusEntry(

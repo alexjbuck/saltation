@@ -24,7 +24,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pydantic
@@ -35,6 +35,8 @@ from pyiceberg.exceptions import (
     ResolveError,
     TableAlreadyExistsError,
 )
+from pyiceberg.expressions.literals import literal
+from pyiceberg.partitioning import PARTITION_FIELD_ID_START, PartitionField, PartitionSpec
 from pyiceberg.schema import Schema, promote
 from pyiceberg.table.sorting import NullOrder
 from pyiceberg.transforms import (
@@ -45,6 +47,7 @@ from pyiceberg.transforms import (
     MonthTransform,
     Transform,
     TruncateTransform,
+    VoidTransform,
     YearTransform,
 )
 from pyiceberg.types import (
@@ -54,6 +57,8 @@ from pyiceberg.types import (
     DecimalType,
     DoubleType,
     FloatType,
+    GeographyType,
+    GeometryType,
     IcebergType,
     IntegerType,
     ListType,
@@ -62,14 +67,16 @@ from pyiceberg.types import (
     NestedField,
     StringType,
     StructType,
+    TimestampNanoType,
     TimestampType,
     TimestamptzType,
+    TimeType,
 )
 from sqlglot import expressions as exp
 
 from cambrian.errors import DispatchError, UnsupportedStatementError
 from cambrian.iceberg.affected import TableIdent, affected_tables
-from cambrian.iceberg.txn import set_location
+from cambrian.iceberg.txn import replace_schema, set_location, upgrade_format_version
 from cambrian.sql.ast import (
     AddPartitionField,
     AlterColumnPosition,
@@ -88,6 +95,7 @@ from cambrian.sql.ast import (
 # Distribution Modes) — ORDERED BY → range, LOCALLY ORDERED BY → none,
 # DISTRIBUTED BY PARTITION → hash.
 _DISTRIBUTION_MODE_KEY = "write.distribution-mode"
+_FORMAT_VERSION_KEY = "format-version"
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -327,6 +335,11 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
     schema = _build_iceberg_schema(column_defs)
     if_not_exists = bool(stmt.args.get("exists"))
     options = _create_table_options(stmt)
+    version = int(options.properties.get(_FORMAT_VERSION_KEY, "2"))
+    if any(f.write_default is not None for f in schema.fields):
+        _require_v3(version, "a column DEFAULT")
+    if any(_is_v3_type(f.field_type) for f in schema.fields):
+        _require_v3(version, "geometry/geography columns")
     names = [_create_partition_name(src, tr) for src, tr in options.partition_fields]
     if dupes := sorted({n for n in names if names.count(n) > 1}):
         raise DispatchError(
@@ -336,19 +349,25 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
         )
 
     try:
-        # One create transaction so the table never exists without its spec
-        # and properties.
-        txn = catalog.create_table_transaction(
+        # Spec and properties go in the create request itself, so the table
+        # never exists without them. (PyIceberg's create *transaction* replays
+        # staged updates locally and refuses format v3 there, so it can't be
+        # used.)
+        table = catalog.create_table(
             identifier=identifier,
             schema=schema,
             location=options.location,
+            partition_spec=_create_partition_spec(schema, options.partition_fields),
             properties=options.properties,
         )
-        if options.partition_fields:
-            with txn.update_spec() as us:
-                for source, transform in options.partition_fields:
-                    us.add_field(source, transform, _create_partition_name(source, transform))
-        txn.commit_transaction()
+        # PyIceberg's create path re-assigns field ids and drops defaults on
+        # the way, so write-defaults follow in a second commit.
+        if defaults := {
+            f.name: f.write_default for f in schema.fields if f.write_default is not None
+        }:
+            with table.update_schema() as upd:
+                for name, value in defaults.items():
+                    upd.set_default_value(name, value)
         notes = f"created table {'.'.join(identifier)}"
     except TableAlreadyExistsError:
         if not if_not_exists:
@@ -404,6 +423,20 @@ def _create_table_options(stmt: exp.Create) -> _CreateTableOptions:
                 ),
             )
     return options
+
+
+def _create_partition_spec(schema: Schema, fields: list[tuple[str, Transform]]) -> PartitionSpec:
+    return PartitionSpec(
+        *(
+            PartitionField(
+                source_id=schema.find_field(source).field_id,
+                field_id=PARTITION_FIELD_ID_START + i,
+                transform=transform,
+                name=_create_partition_name(source, transform),
+            )
+            for i, (source, transform) in enumerate(fields)
+        )
+    )
 
 
 def _create_partition_name(source: str, transform: Transform) -> str:
@@ -620,15 +653,23 @@ def _add_column(table: Table, col_def: exp.ColumnDef) -> str:
     path = tuple(name.split("."))
     if _has_field(table, name):
         return f"add column {name}: already exists (idempotent)"
-    if _is_required(col_def):
+    default = _column_default(col_def)
+    required = _is_required(col_def)
+    if _is_v3_type(dtype):
+        _require_v3(table.format_version, f"column {name} of type {dtype}")
+    if default is not None:
+        _require_v3(table.format_version, f"DEFAULT on column {name}")
+    elif required:
         # Spark-Iceberg refuses this: existing rows have no value for the new
-        # column, so it can only be required once v3 defaults supply one.
+        # column, so it can only be required once a v3 default supplies one.
         raise DispatchError(
             f"cannot add required column {name}: existing rows would have no value. "
             "Add it as nullable, or (format v3) give it a DEFAULT"
         )
     with table.update_schema() as us:
-        us.add_column(path, dtype, doc=_column_comment(col_def), required=False)
+        us.add_column(
+            path, dtype, doc=_column_comment(col_def), required=required, default_value=default
+        )
         _apply_position(us, name, col_def.args.get("position"))
     return f"add column {name}"
 
@@ -717,6 +758,10 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
             # already satisfies "at least this wide", so leave the type alone.
             notes.append(f"type -> {field_type}: already wider (idempotent)")
             field_type = None
+        elif _is_date_to_timestamp(table, name, field_type):
+            _promote_date(table, name, field_type)
+            notes.append(f"type -> {field_type}")
+            field_type = None
         else:
             notes.append(f"type -> {field_type}")
     if comment_node is not None:
@@ -734,6 +779,17 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
     elif allow_null is True:
         required = False
         notes.append("drop not null")
+    default_node = action.args.get("default")
+    drop_default = bool(action.args.get("drop")) and allow_null is None
+    if default_node is not None or drop_default:
+        _require_v3(table.format_version, f"a DEFAULT on column {name}")
+        value = None if drop_default else _literal_value(default_node)
+        try:
+            with table.update_schema() as us:
+                us.set_default_value(tuple(name.split(".")), value)
+        except ValueError as err:
+            raise DispatchError(f"cannot change the default of {name}: {err}") from err
+        notes.append("drop default" if drop_default else f"default -> {value!r}")
 
     if not notes:
         raise UnsupportedStatementError(
@@ -747,6 +803,84 @@ def _alter_column(table: Table, action: exp.AlterColumn) -> str:
         with table.update_schema() as us:
             us.update_column(name, field_type=field_type, required=required, doc=doc)
     return f"alter column {name} ({', '.join(notes)})"
+
+
+def _is_date_to_timestamp(table: Table, name: str, requested: IcebergType) -> bool:
+    try:
+        current = table.schema().find_field(name).field_type
+    except ValueError:
+        return False
+    return isinstance(current, DateType) and isinstance(
+        requested, TimestampType | TimestampNanoType
+    )
+
+
+# Transforms that give the same value for a date and the timestamp it promotes
+# to (spec: Schema Evolution); any other transform on the source blocks it.
+_DATE_PROMOTION_SAFE = (YearTransform, MonthTransform, DayTransform, VoidTransform)
+
+
+def _promote_date(table: Table, name: str, target: IcebergType) -> None:
+    """Iceberg v3 date -> timestamp/timestamp_ns, which PyIceberg's UpdateSchema refuses."""
+    _require_v3(table.format_version, f"promoting date column {name} to {target}")
+    schema = table.schema()
+    field_id = schema.find_field(name).field_id
+    for spec in table.specs().values():
+        for pf in spec.fields:
+            if pf.source_id == field_id and not isinstance(pf.transform, _DATE_PROMOTION_SAFE):
+                raise DispatchError(
+                    f"cannot promote {name} to {target}: partition field {pf.name} uses "
+                    f"{pf.transform}, which gives different values for dates and timestamps"
+                )
+    next_id = max(table.schemas()) + 1
+    struct = _replace_field_type(schema.as_struct(), field_id, target)
+    assert isinstance(struct, StructType)
+    replace_schema(
+        table,
+        Schema(
+            *struct.fields,
+            schema_id=next_id,
+            identifier_field_ids=list(schema.identifier_field_ids),
+        ),
+    )
+
+
+def _replace_field_type(t: IcebergType, field_id: int, new_type: IcebergType) -> IcebergType:
+    def swap(f: NestedField) -> NestedField:
+        ftype = (
+            new_type
+            if f.field_id == field_id
+            else _replace_field_type(f.field_type, field_id, new_type)
+        )
+        return NestedField(
+            field_id=f.field_id,
+            name=f.name,
+            field_type=ftype,
+            required=f.required,
+            doc=f.doc,
+            initial_default=f.initial_default,
+            write_default=f.write_default,
+        )
+
+    if isinstance(t, StructType):
+        return StructType(*(swap(f) for f in t.fields))
+    if isinstance(t, ListType):
+        element = swap(t.element_field)
+        return ListType(
+            element_id=element.field_id,
+            element_type=element.field_type,
+            element_required=element.required,
+        )
+    if isinstance(t, MapType):
+        key, value = swap(t.key_field), swap(t.value_field)
+        return MapType(
+            key_id=key.field_id,
+            key_type=key.field_type,
+            value_id=value.field_id,
+            value_type=value.field_type,
+            value_required=value.required,
+        )
+    return t
 
 
 def _already_widened(table: Table, name: str, requested: IcebergType) -> bool:
@@ -843,7 +977,12 @@ def _set_tblproperties(table: Table, action: exp.AlterSet) -> str:
                     if key is None:
                         continue
                     props[key] = "" if value is None else value
+    notes: list[str] = []
+    if (version := props.pop(_FORMAT_VERSION_KEY, None)) is not None:
+        notes.append(_upgrade_format(table, version))
     if not props:
+        if notes:
+            return "; ".join(notes)
         raise UnsupportedStatementError(
             statement_sql=action.sql(),
             reason="ALTER TABLE ... SET supports TBLPROPERTIES, LOCATION and IDENTIFIER FIELDS",
@@ -852,7 +991,45 @@ def _set_tblproperties(table: Table, action: exp.AlterSet) -> str:
         # PyIceberg's set_properties takes a dict via the first positional
         # ``properties`` arg, NOT **kwargs of stringified Properties.
         txn.set_properties(properties=props)
-    return f"set tblproperties {sorted(props)}"
+    return "; ".join([*notes, f"set tblproperties {sorted(props)}"])
+
+
+def _upgrade_format(table: Table, version: str) -> str:
+    # format-version is reserved: the catalog rejects it as a property and
+    # needs an upgrade-format-version update instead.
+    try:
+        target = int(version)
+    except ValueError as err:
+        raise DispatchError(f"format-version must be an integer, got {version!r}") from err
+    if target < table.format_version:
+        raise DispatchError(
+            f"cannot downgrade format-version {table.format_version} to {target}: "
+            "the Iceberg spec only allows upgrades"
+        )
+    if target == table.format_version:
+        return f"format-version {target}: unchanged (idempotent)"
+    upgrade_format_version(table, target)
+    return f"upgraded format-version to {target}"
+
+
+def _is_v3_type(t: IcebergType) -> bool:
+    if isinstance(t, GeometryType | GeographyType | TimestampNanoType):
+        return True
+    if isinstance(t, StructType):
+        return any(_is_v3_type(f.field_type) for f in t.fields)
+    if isinstance(t, ListType):
+        return _is_v3_type(t.element_type)
+    if isinstance(t, MapType):
+        return _is_v3_type(t.key_type) or _is_v3_type(t.value_type)
+    return False
+
+
+def _require_v3(table_version: int, what: str) -> None:
+    if table_version < 3:
+        raise DispatchError(
+            f"{what} needs Iceberg format v3 (table is v{table_version}); upgrade first with "
+            "ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '3')"
+        )
 
 
 def _unset_tblproperties(table: Table, action: UnsetTblProperties) -> str:
@@ -1314,7 +1491,7 @@ def _value_rows(values: exp.Values, schema: pa.Schema) -> Iterable[dict[str, obj
         yield {names[i]: _literal_value(lit) for i, lit in enumerate(literals)}
 
 
-def _literal_value(node: exp.Expression) -> object:
+def _literal_value(node: exp.Expression) -> str | bool | int | float | None:
     """Convert a parsed literal node to its Python value.
 
     Supports: Literal (string/number), Boolean, Null. Identifiers/Columns
@@ -1387,6 +1564,7 @@ def _build_iceberg_schema(column_defs: list[exp.Expression]) -> Schema:
         # ``NOT NULL`` constraint via constraints=[]; sqlglot puts that under
         # ``constraints``.
         required = _is_required(node)
+        default = _column_default(node)
         fields.append(
             NestedField(
                 field_id=field_id,
@@ -1394,6 +1572,9 @@ def _build_iceberg_schema(column_defs: list[exp.Expression]) -> Schema:
                 field_type=iceberg_type,
                 required=required,
                 doc=_column_comment(node),
+                # The spec sets initial-default only for fields added later;
+                # a create-time DEFAULT is the write default.
+                write_default=_coerce_default(default, iceberg_type),
             )
         )
     return Schema(*fields)
@@ -1404,6 +1585,21 @@ def _column_comment(col_def: exp.ColumnDef) -> str | None:
         kind = constraint.args.get("kind") if isinstance(constraint, exp.Expression) else None
         if isinstance(kind, exp.CommentColumnConstraint):
             return _scalar(kind.this)
+    return None
+
+
+def _coerce_default(value: str | bool | int | float | None, to: IcebergType) -> Any:
+    if value is None:
+        return None
+    # literal() is typed with a constrained TypeVar, which a union can't satisfy.
+    return literal(value).to(to).value  # ty: ignore[invalid-argument-type]
+
+
+def _column_default(col_def: exp.ColumnDef) -> str | bool | int | float | None:
+    for constraint in col_def.args.get("constraints") or []:
+        kind = constraint.args.get("kind") if isinstance(constraint, exp.Expression) else None
+        if isinstance(kind, exp.DefaultColumnConstraint):
+            return _literal_value(kind.this)
     return None
 
 
@@ -1431,6 +1627,7 @@ _SQLGLOT_TYPE_TO_ICEBERG: dict[exp.DataType.Type, type[IcebergType]] = {
     exp.DataType.Type.BINARY: BinaryType,
     exp.DataType.Type.VARBINARY: BinaryType,
     exp.DataType.Type.DATE: DateType,
+    exp.DataType.Type.TIME: TimeType,
     # cambrian keeps its existing TIMESTAMP→timestamptz mapping deliberately:
     # Spark 3.4+ treats bare TIMESTAMP as tz-bearing, and changing this is a
     # separate decision. Only TIMESTAMP_NTZ is added here (no-tz timestamp).
@@ -1468,6 +1665,13 @@ def _iceberg_type_from_sqlglot(
         return _list_type_from_sqlglot(kind, ids)
     if base == exp.DataType.Type.MAP:
         return _map_type_from_sqlglot(kind, ids)
+    if base in (exp.DataType.Type.GEOMETRY, exp.DataType.Type.GEOGRAPHY):
+        return _geo_type(kind)
+    if base == exp.DataType.Type.VARIANT:
+        raise UnsupportedStatementError(
+            statement_sql=kind.sql(),
+            reason="variant (Iceberg v3) needs a variant type PyIceberg doesn't provide yet",
+        )
     iceberg_cls = _SQLGLOT_TYPE_TO_ICEBERG.get(base)
     if iceberg_cls is None:
         raise UnsupportedStatementError(
@@ -1479,6 +1683,21 @@ def _iceberg_type_from_sqlglot(
             ),
         )
     return iceberg_cls()
+
+
+def _geo_type(kind: exp.DataType) -> IcebergType:
+    # GEOMETRY[(crs)] / GEOGRAPHY[(crs[, algorithm])]. A bare integer is an
+    # EPSG SRID; a string is taken as the CRS verbatim (e.g. 'OGC:CRS84').
+    params = [_scalar(p.this if isinstance(p, exp.DataTypeParam) else p) for p in kind.expressions]
+    crs = None
+    if params and params[0] is not None:
+        crs = params[0] if not params[0].isdigit() else f"EPSG:{params[0]}"
+    if kind.this == exp.DataType.Type.GEOMETRY:
+        return GeometryType(crs) if crs else GeometryType()
+    algorithm = (params[1] or "").lower() if len(params) > 1 else None
+    if crs and algorithm:
+        return GeographyType(crs, algorithm)
+    return GeographyType(crs) if crs else GeographyType()
 
 
 def _struct_type_from_sqlglot(kind: exp.DataType, ids: _FieldIds) -> StructType:

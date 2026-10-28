@@ -119,6 +119,7 @@ class Column:
     type: ColType
     required: bool = False
     doc: str | None = None
+    default: int | str | None = None
 
 
 @dataclass
@@ -150,6 +151,7 @@ class TableModel:
     reordered: bool = False
     dropped_partitions: set[tuple[str, str]] = field(default_factory=set)
     next_col: int = 0
+    fv: int = 2
 
     def droppable(self, features: Features) -> list[Column]:
         blocked = self.pinned | self.identifier
@@ -167,7 +169,9 @@ class TableModel:
 
     def fingerprint(self) -> dict[str, Any]:
         return {
-            "columns": [(c.name, c.type.iceberg, c.required, c.doc) for c in self.columns],
+            "columns": [
+                (c.name, c.type.iceberg, c.required, c.doc, c.default) for c in self.columns
+            ],
             "partition": [(p.source, p.transform) for p in self.partition],
             "sort": list(self.sort),
             "props": dict(sorted(self.props.items())),
@@ -204,6 +208,8 @@ class Features:
     unset_props: bool = False
     identifier: bool = True
     max_tables: int = 2
+    # Format v3: create/upgrade v3 tables, column DEFAULTs, date -> timestamp.
+    v3: bool = True
 
 
 @dataclass
@@ -241,6 +247,8 @@ def _q(ns_table: str) -> str:
 @st.composite
 def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableModel]:
     t = TableModel(name=name)
+    if features.v3 and draw(st.booleans()):
+        t.fv = 3
     n = draw(st.integers(min_value=1, max_value=5))
     defs: list[str] = []
     for _ in range(n):
@@ -249,6 +257,9 @@ def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableM
         d = f"{col.name} {ctype.sql}"
         if col.required:
             d += " NOT NULL"
+        if t.fv >= 3 and ctype.sql in _DEFAULTABLE and draw(st.booleans()):
+            col.default = draw(_DEFAULTABLE[ctype.sql])
+            d += f" DEFAULT {_default_sql(col.default)}"
         if features.column_comments_on_create and draw(st.booleans()):
             lit, col.doc = draw(_DOCS)
             d += f" COMMENT '{lit}'"
@@ -276,10 +287,13 @@ def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableM
     if features.create_comment and draw(st.booleans()):
         lit, t.props[TABLE_COMMENT] = draw(_DOCS)
         sql += f" COMMENT '{lit}'"
+    pairs: dict[str, str] = {"format-version": "3"} if t.fv >= 3 else {}
     if features.create_tblproperties and draw(st.booleans()):
         kv = draw(st.dictionaries(_PROP_KEYS, _PROP_VALS, min_size=1, max_size=3))
         t.props.update(kv)
-        sql += " TBLPROPERTIES (" + ", ".join(f"'{k}'='{v}'" for k, v in kv.items()) + ")"
+        pairs.update(kv)
+    if pairs:
+        sql += " TBLPROPERTIES (" + ", ".join(f"'{k}'='{v}'" for k, v in pairs.items()) + ")"
     return sql + ";", t
 
 
@@ -295,6 +309,13 @@ def _partition_options(t: TableModel, features: Features) -> list[tuple[Column, 
                 continue
             options.append((c, tmpl.format(c=c.name), tr))
     return options
+
+
+_DEFAULTABLE = {INT.sql: st.integers(-5, 5), STRING.sql: st.sampled_from(["a", "b"])}
+
+
+def _default_sql(value: int | str) -> str:
+    return f"'{value}'" if isinstance(value, str) else str(value)
 
 
 def _candidates(t: TableModel, features: Features) -> list[str]:
@@ -321,6 +342,11 @@ def _candidates(t: TableModel, features: Features) -> list[str]:
         kinds.append("unset_props")
     if features.identifier:
         kinds.append("identifier")
+    if features.v3:
+        if t.fv < 3:
+            kinds.append("upgrade_v3")
+        else:
+            kinds += ["set_default", "promote_date"]
     return kinds
 
 
@@ -334,6 +360,12 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
         ctype = draw(st.sampled_from(PRIMITIVES))
         col = Column(t.fresh_name(), ctype)
         sql = f"ALTER TABLE {tbl} ADD COLUMN {col.name} {ctype.sql}"
+        if t.fv >= 3 and ctype.sql in _DEFAULTABLE and draw(st.booleans()):
+            col.default = draw(_DEFAULTABLE[ctype.sql])
+            col.required = draw(st.booleans())
+            if col.required:
+                sql += " NOT NULL"
+            sql += f" DEFAULT {_default_sql(col.default)}"
         if features.column_comments_on_add and draw(st.booleans()):
             lit, col.doc = draw(_DOCS)
             sql += f" COMMENT '{lit}'"
@@ -445,6 +477,34 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
         t.ever_identifier |= t.identifier
         return f"ALTER TABLE {tbl} SET IDENTIFIER FIELDS {', '.join(c.name for c in chosen)};"
 
+    if kind == "upgrade_v3":
+        t.fv = 3
+        return f"ALTER TABLE {tbl} SET TBLPROPERTIES ('format-version' = '3');"
+
+    if kind == "set_default":
+        options = [c for c in t.columns if c.type.sql in _DEFAULTABLE]
+        if not options:
+            return None
+        col = draw(st.sampled_from(options))
+        t.altered.add(col.name)
+        # A required column can't lose its default (rows need a value).
+        if col.default is not None and not col.required and draw(st.booleans()):
+            col.default = None
+            return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} DROP DEFAULT;"
+        col.default = draw(_DEFAULTABLE[col.type.sql])
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} SET DEFAULT {_default_sql(col.default)};"
+
+    if kind == "promote_date":
+        # Partition/sort-pinned dates are skipped: bucket/identity on a date
+        # gives different values once it's a timestamp, so the spec forbids it.
+        options = [c for c in t.columns if c.type == DATE and c.name not in t.pinned]
+        if not options:
+            return None
+        col = draw(st.sampled_from(options))
+        col.type = TS_NTZ
+        t.altered.add(col.name)
+        return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} TYPE TIMESTAMP_NTZ;"
+
     raise AssertionError(kind)
 
 
@@ -499,7 +559,10 @@ def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str,
             if k.startswith(PROP_PREFIX) or k in {DISTRIBUTION_MODE, TABLE_COMMENT}
         }
         out[ident[-1]] = {
-            "columns": [(f.name, str(f.field_type), f.required, f.doc) for f in schema.fields],
+            "columns": [
+                (f.name, str(f.field_type), f.required, f.doc, f.write_default)
+                for f in schema.fields
+            ],
             "partition": [
                 (names.get(pf.source_id, f"<dropped:{pf.source_id}>"), str(pf.transform))
                 for pf in table.spec().fields

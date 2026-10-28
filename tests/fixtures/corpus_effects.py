@@ -112,6 +112,12 @@ def ns_created(props: dict[str, str] | None = None) -> dict[str, Any]:
     return {"exists": True, "state": {"props": props or {}}}
 
 
+V3 = "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')"
+# Lakekeeper rejects even a bare "geometry" schema type (HTTP 422). PyIceberg
+# 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none.
+_NO_GEO = "Lakekeeper v0.12.2 can't deserialize geometry/geography schema types"
+
+
 def t(effect: dict[str, Any], **kw: Any) -> Effect:
     return Effect({"foo.t": effect}, **kw)
 
@@ -412,6 +418,56 @@ EFFECTS: dict[str, Effect] = {
     "set_identifier_fields_multi": t({"ident": {"-": [], "+": ["data first", "id after data"]}}),
     "drop_identifier_fields": t(
         {"ident": {"-": ["id"], "+": []}}, setup=("ALTER TABLE foo.t SET IDENTIFIER FIELDS id",)
+    ),
+    # --- format v3 ------------------------------------------------------------
+    "ct_time": t(created(["t:time"]), base="ns"),
+    "ct_v3_geo_types": t(
+        catalog_refuses=_NO_GEO,
+        effect=created(
+            [
+                "g:geometry",
+                "g2:geometry('EPSG:4326')",
+                "gg:geography",
+                "gg2:geography('OGC:CRS84', 'vincenty')",
+            ],
+            fv=3,
+        ),
+        base="ns",
+    ),
+    "ct_v3_partitioned": t(
+        created(
+            ["id:long", "ts:timestamptz"],
+            spec=["id:bucket[8]:id_bucket", "ts:day:ts_day"],
+            fv=3,
+        ),
+        base="ns",
+    ),
+    "ct_v3_geo_on_v2": t({}, base="ns"),
+    "ct_v3_default": t(created(["id:long", "status:string=new"], fv=3), base="ns"),
+    "ct_default_on_v2": t({}, base="ns"),
+    "upgrade_format_v3": t({"fv": [2, 3]}),
+    "downgrade_format": t({}, setup=(V3,)),
+    "add_column_default_v3": t(
+        cols(plus=["c:int=5 after m.value.a"]), setup=(V3, "ALTER TABLE foo.t DROP COLUMN c")
+    ),
+    "add_column_not_null_default_v3": t(
+        cols(plus=["c:int!=5 after m.value.a"]), setup=(V3, "ALTER TABLE foo.t DROP COLUMN c")
+    ),
+    "add_column_geometry_v3": t(
+        cols(plus=["g:geometry after m.value.a"]), setup=(V3,), catalog_refuses=_NO_GEO
+    ),
+    "alter_column_set_default": t(
+        cols(minus=["c:int"], plus=["c:int=7 after measurement"]), setup=(V3,)
+    ),
+    "alter_column_drop_default": t(
+        cols(minus=["c:int=7"], plus=["c:int after measurement"]),
+        setup=(V3, "ALTER TABLE foo.t ALTER COLUMN c SET DEFAULT 7"),
+    ),
+    "promote_date_to_timestamp": t(
+        cols(minus=["d:date"], plus=["d:timestamp after ts"]), setup=(V3,)
+    ),
+    "promote_date_bucketed": t(
+        {}, setup=(V3, "ALTER TABLE foo.t ADD PARTITION FIELD bucket(4, d)")
     ),
     # --- data ops ---------------------------------------------------------
     "insert_values_single": t({"rows": [0, 1]}, base="pair", reapply=False),

@@ -1,9 +1,10 @@
 """Raw table-update commits — the one place ``Transaction._apply`` is used.
 
-Callers: ``restore_pointers`` (the rollback primitive), ``set_location`` and
-``upgrade_format_version``. The latter two exist because PyIceberg's public
-``Transaction.update_location`` is unimplemented and ``upgrade_table_version``
-refuses format v3, while the REST catalog accepts both updates.
+Callers: ``restore_pointers`` (the rollback primitive), ``set_location``,
+``upgrade_format_version`` and ``replace_schema``. The others exist because
+PyIceberg's public ``Transaction.update_location`` is unimplemented,
+``upgrade_table_version`` refuses format v3, and ``UpdateSchema`` refuses the
+v3 date -> timestamp promotion, while the REST catalog accepts all three.
 
 PyIceberg 0.11 ships ``Transaction._apply`` as a leading-underscore "private" method.
 In practice it's been stable across the 0.x line and is the only API that can atomically
@@ -29,9 +30,11 @@ operations must be siblings in this module that route through ``_commit``.
 from __future__ import annotations
 
 from pyiceberg.exceptions import CommitFailedException, RESTError
+from pyiceberg.schema import Schema
 from pyiceberg.table import Table
 from pyiceberg.table.refs import SnapshotRefType
 from pyiceberg.table.update import (
+    AddSchemaUpdate,
     AssertRefSnapshotId,
     SetCurrentSchemaUpdate,
     SetDefaultSortOrderUpdate,
@@ -116,6 +119,15 @@ def restore_pointers(
         ) from err
 
 
+def replace_schema(table: Table, schema: Schema) -> None:
+    """Add *schema* and make it current.
+
+    For evolutions PyIceberg's UpdateSchema refuses but the spec allows (v3
+    date -> timestamp promotion).
+    """
+    _commit(table, (AddSchemaUpdate(schema=schema), _set_schema(-1)), ())
+
+
 def set_location(table: Table, location: str) -> None:
     _commit(table, (SetLocationUpdate(location=location),), ())
 
@@ -125,7 +137,9 @@ def upgrade_format_version(table: Table, format_version: int) -> None:
     if table.format_version >= format_version:
         return
     update = UpgradeFormatVersionUpdate(format_version=format_version)  # ty: ignore[unknown-argument, missing-argument]
-    _commit(table, (update,), ())
+    # Sent straight to the catalog: a Transaction first replays the update on
+    # its local metadata copy, and PyIceberg 0.12 rejects v3 there.
+    table.catalog.commit_table(table, (), (update,))
 
 
 def _commit(

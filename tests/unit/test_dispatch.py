@@ -146,8 +146,8 @@ def test_create_table_simple() -> None:
         catalog,
         _single("CREATE TABLE foo.t (id BIGINT, name STRING) USING iceberg"),
     )
-    catalog.create_table_transaction.assert_called_once()
-    args = catalog.create_table_transaction.call_args.kwargs
+    catalog.create_table.assert_called_once()
+    args = catalog.create_table.call_args.kwargs
     assert args["identifier"] == ("foo", "t")
     schema = args["schema"]
     assert isinstance(schema, Schema)
@@ -165,7 +165,7 @@ def test_create_table_type_mapping() -> None:
         ") USING iceberg"
     )
     dispatch(catalog, _single(sql))
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     types = [type(f.field_type) for f in schema.fields]
     assert types[0] is IntegerType
     assert types[1] is LongType
@@ -183,7 +183,7 @@ def test_create_table_type_mapping() -> None:
 def test_create_table_already_exists_is_idempotent() -> None:
     """Without IF NOT EXISTS, re-applying CREATE TABLE is still safe."""
     catalog = _make_catalog()
-    catalog.create_table_transaction.side_effect = TableAlreadyExistsError("dup")
+    catalog.create_table.side_effect = TableAlreadyExistsError("dup")
     result = dispatch(catalog, _single("CREATE TABLE foo.t (id INT) USING iceberg"))
     assert "already exists" in result.notes
     assert result.affected_tables == [TableIdent(namespace="foo", name="t")]
@@ -617,7 +617,7 @@ def test_create_table_struct() -> None:
         catalog,
         _single("CREATE TABLE foo.t (point STRUCT<x: DOUBLE, y: DOUBLE>) USING iceberg"),
     )
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     assert isinstance(schema.fields[0].field_type, StructType)
     assert [f.name for f in schema.fields[0].field_type.fields] == ["x", "y"]
 
@@ -625,14 +625,14 @@ def test_create_table_struct() -> None:
 def test_create_table_array() -> None:
     catalog = _make_catalog()
     dispatch(catalog, _single("CREATE TABLE foo.t (tags ARRAY<STRING>) USING iceberg"))
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     assert isinstance(schema.fields[0].field_type, ListType)
 
 
 def test_create_table_map() -> None:
     catalog = _make_catalog()
     dispatch(catalog, _single("CREATE TABLE foo.t (attrs MAP<STRING, INT>) USING iceberg"))
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     assert isinstance(schema.fields[0].field_type, MapType)
 
 
@@ -646,7 +646,7 @@ def test_create_table_nested_combo_unique_ids() -> None:
             ") USING iceberg"
         ),
     )
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     # Every field id across the whole (nested) schema must be unique.
     ids = [f.field_id for f in schema._lazy_id_to_field.values()]
     assert len(ids) == len(set(ids))
@@ -655,7 +655,7 @@ def test_create_table_nested_combo_unique_ids() -> None:
 def test_create_table_timestamp_ntz_maps_to_no_tz() -> None:
     catalog = _make_catalog()
     dispatch(catalog, _single("CREATE TABLE foo.t (i TIMESTAMP_NTZ) USING iceberg"))
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     assert type(schema.fields[0].field_type) is TimestampType
 
 
@@ -928,7 +928,7 @@ def test_create_table_carries_column_comments() -> None:
     catalog = _make_catalog()
     sql = "CREATE TABLE foo.t (a INT COMMENT 'the a', b STRING NOT NULL) USING iceberg"
     dispatch(catalog, _single(sql))
-    schema = catalog.create_table_transaction.call_args.kwargs["schema"]
+    schema = catalog.create_table.call_args.kwargs["schema"]
     assert [f.doc for f in schema.fields] == ["the a", None]
     assert [f.required for f in schema.fields] == [False, True]
 
@@ -942,30 +942,26 @@ def test_create_table_partition_props_comment_location() -> None:
         "TBLPROPERTIES ('write.metadata.previous-versions-max'='1000')"
     )
     dispatch(catalog, _single(sql))
-    kwargs = catalog.create_table_transaction.call_args.kwargs
+    kwargs = catalog.create_table.call_args.kwargs
     assert kwargs["location"] == "s3://b/p"
     assert kwargs["properties"] == {
         "comment": "tbl doc",
         "write.metadata.previous-versions-max": "1000",
     }
-    txn = catalog.create_table_transaction.return_value
-    us = txn.update_spec.return_value.__enter__.return_value
-    added = [(c.args[0], str(c.args[1])) for c in us.add_field.call_args_list]
-    assert added == [
-        ("id", "bucket[16]"),
-        ("ts", "day"),
-        ("cat", "identity"),
-        ("cat", "truncate[4]"),
+    spec = kwargs["partition_spec"]
+    # Spark's CREATE-time names (PartitionSpec.Builder), not ADD PARTITION FIELD's.
+    assert [(f.source_id, str(f.transform), f.name) for f in spec.fields] == [
+        (1, "bucket[16]", "id_bucket"),
+        (2, "day", "ts_day"),
+        (3, "identity", "cat"),
+        (3, "truncate[4]", "cat_trunc"),
     ]
-    txn.commit_transaction.assert_called_once()
 
 
-def test_create_table_unpartitioned_skips_update_spec() -> None:
+def test_create_table_unpartitioned_has_empty_spec() -> None:
     catalog = _make_catalog()
     dispatch(catalog, _single("CREATE TABLE foo.t (id BIGINT) USING iceberg"))
-    txn = catalog.create_table_transaction.return_value
-    txn.update_spec.assert_not_called()
-    txn.commit_transaction.assert_called_once()
+    assert catalog.create_table.call_args.kwargs["partition_spec"].is_unpartitioned()
 
 
 def test_create_table_unknown_clause_is_refused() -> None:
@@ -973,7 +969,7 @@ def test_create_table_unknown_clause_is_refused() -> None:
     sql = "CREATE TABLE foo.t (id BIGINT) USING iceberg CLUSTERED BY (id) INTO 4 BUCKETS"
     with pytest.raises(UnsupportedStatementError):
         dispatch(catalog, _single(sql))
-    catalog.create_table_transaction.assert_not_called()
+    catalog.create_table.assert_not_called()
 
 
 def test_create_table_duplicate_spark_partition_names_refused() -> None:
@@ -981,4 +977,4 @@ def test_create_table_duplicate_spark_partition_names_refused() -> None:
     sql = "CREATE TABLE foo.t (c INT) USING iceberg PARTITIONED BY (bucket(4, c), bucket(16, c))"
     with pytest.raises(DispatchError, match="c_bucket"):
         dispatch(catalog, _single(sql))
-    catalog.create_table_transaction.assert_not_called()
+    catalog.create_table.assert_not_called()
