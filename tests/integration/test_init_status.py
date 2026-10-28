@@ -21,14 +21,10 @@ from typer.testing import CliRunner
 from cambrian.cli import EXIT_NOT_INITIALIZED, EXIT_VERSION_AHEAD, app
 from cambrian.sidecar.schema import VERSION_TABLE
 from tests.integration.conftest import (
-    LAKEKEEPER_HOST_URL,
-    RUSTFS_ACCESS_KEY,
-    RUSTFS_HOST_URL,
-    RUSTFS_REGION,
-    RUSTFS_SECRET_KEY,
-    WAREHOUSE_NAME,
     _drop_namespace_recursively,
 )
+
+from .rig import catalog_toml
 
 
 @pytest.fixture
@@ -46,16 +42,7 @@ def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
 def config_path(tmp_path: Path, sidecar_ns: str) -> Path:
     """Write a cambrian.toml pointed at the test rig + per-test sidecar namespace."""
     body = f"""
-[catalog]
-type = "rest"
-uri = "{LAKEKEEPER_HOST_URL}/catalog"
-warehouse = "{WAREHOUSE_NAME}"
-"s3.endpoint" = "{RUSTFS_HOST_URL}"
-"s3.access-key-id" = "{RUSTFS_ACCESS_KEY}"
-"s3.secret-access-key" = "{RUSTFS_SECRET_KEY}"
-"s3.region" = "{RUSTFS_REGION}"
-"s3.path-style-access" = "true"
-
+{catalog_toml()}
 [evolutions]
 sidecar_namespace = "{sidecar_ns}"
 """

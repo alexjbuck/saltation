@@ -19,7 +19,7 @@ import pytest
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig
+from cambrian.config import CambrianConfig, EvolutionsConfig
 from cambrian.migrate import apply_idempotent
 from cambrian.migrate.commit import (
     cambrian_commit,
@@ -28,24 +28,12 @@ from cambrian.migrate.commit import (
 from cambrian.migrate.sync import cambrian_sync
 from cambrian.sidecar.events import committed_evolutions
 
-LAKEKEEPER_URL = "http://localhost:8181"
-WAREHOUSE = "cambrian"
+from .rig import catalog_config
 
 
 def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> CambrianConfig:
     return CambrianConfig(
-        catalog=CatalogConfig(
-            type="rest",
-            uri=f"{LAKEKEEPER_URL}/catalog",
-            **{
-                "warehouse": WAREHOUSE,
-                "s3.endpoint": "http://localhost:9000",
-                "s3.access-key-id": "cambrian-access-key",
-                "s3.secret-access-key": "cambrian-secret-key",
-                "s3.region": "local",
-                "s3.path-style-access": "true",
-            },
-        ),
+        catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
             sidecar_namespace=sidecar_namespace,

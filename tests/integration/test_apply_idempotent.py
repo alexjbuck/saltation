@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig, ViewsConfig
+from cambrian.config import CambrianConfig, EvolutionsConfig, ViewsConfig
 from cambrian.errors import UnsupportedStatementError
 from cambrian.migrate import apply_idempotent
 from cambrian.sidecar.events import latest_event
@@ -30,8 +30,8 @@ from cambrian.sidecar.events import latest_event
 # Re-use the rig coordinates from conftest.py. Keeping these as constants
 # rather than importing the fixture's internals so the integration tests
 # stay independent of conftest implementation details.
-LAKEKEEPER_URL = "http://localhost:8181"
-WAREHOUSE = "cambrian"
+from .rig import catalog_config
+from .rig import rest_catalog as rig_catalog
 
 
 def _build_config(
@@ -45,18 +45,7 @@ def _build_config(
     without touching the filesystem outside ``tmp_path``.
     """
     return CambrianConfig(
-        catalog=CatalogConfig(
-            type="rest",
-            uri=f"{LAKEKEEPER_URL}/catalog",
-            **{  # extras forwarded to PyIceberg
-                "warehouse": WAREHOUSE,
-                "s3.endpoint": "http://localhost:9000",
-                "s3.access-key-id": "cambrian-access-key",
-                "s3.secret-access-key": "cambrian-secret-key",
-                "s3.region": "local",
-                "s3.path-style-access": "true",
-            },
-        ),
+        catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
             sidecar_namespace=sidecar_namespace,
@@ -113,20 +102,8 @@ def test_apply_creates_namespace_and_table(
     assert result1.error is None
 
     # Verify table exists and has two rows.
-    from pyiceberg.catalog.rest import RestCatalog as _RC
 
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     arrow = table.scan().to_arrow()
     assert arrow.num_rows == 2
@@ -164,20 +141,7 @@ def test_apply_edit_reapplies(
     result2 = apply_idempotent(cfg)
     assert result2.status == "applied"
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     fields = [f.name for f in table.schema().fields]
     assert "added" in fields
@@ -200,20 +164,7 @@ def test_apply_multi_column_alter_splits(
     result = apply_idempotent(cfg)
     assert result.status == "applied"
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     names = [f.name for f in table.schema().fields]
     assert names == ["id", "a", "b", "c"]
@@ -247,20 +198,7 @@ def test_apply_include(rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidec
     result = apply_idempotent(cfg)
     assert result.status == "applied", result
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     arrow = table.scan().to_arrow()
     assert arrow.num_rows == 1

@@ -13,7 +13,7 @@ Targets are table identifiers (``foo.t``), ``ns:<namespace>`` or
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from tests.fixtures.catalog_state import ANY
@@ -79,8 +79,10 @@ class Effect:
     setup: tuple[str, ...] = ()
     # Data ops append on every run; everything else must be a no-op the second time.
     reapply: bool = True
-    # The test catalog (Lakekeeper) refuses this; cambrian's request is still correct.
-    catalog_refuses: str | None = None
+    # Test catalogs (by rig name) that refuse this, with why; cambrian's request
+    # is still correct. Run as strict xfails, so a catalog that starts
+    # accepting it is noticed.
+    catalog_refuses: dict[str, str] = field(default_factory=dict)
 
 
 def created(
@@ -115,7 +117,7 @@ def ns_created(props: dict[str, str] | None = None) -> dict[str, Any]:
 V3 = "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')"
 # Lakekeeper rejects even a bare "geometry" schema type (HTTP 422). PyIceberg
 # 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none.
-_NO_GEO = "Lakekeeper v0.12.2 can't deserialize geometry/geography schema types"
+_NO_GEO = "Lakekeeper (v0.14.2) can't deserialize geometry/geography schema types"
 
 
 # Views store one SQL text per dialect; the effect tests store two so the
@@ -439,7 +441,7 @@ EFFECTS: dict[str, Effect] = {
     "set_comment_property": t({"props": {"comment": [None, "A table comment."]}}),
     "set_location": t(
         {"loc": [ANY, "s3://bucket/moved"]},
-        catalog_refuses="Lakekeeper manages table locations: SetLocationNotAllowed",
+        catalog_refuses={"lakekeeper": "Lakekeeper manages table locations: SetLocationNotAllowed"},
     ),
     # --- identifier fields ------------------------------------------------
     "set_identifier_fields_single": t({"ident": {"-": [], "+": ["id first"]}}),
@@ -450,7 +452,7 @@ EFFECTS: dict[str, Effect] = {
     # --- format v3 ------------------------------------------------------------
     "ct_time": t(created(["t:time"]), base="ns"),
     "ct_v3_geo_types": t(
-        catalog_refuses=_NO_GEO,
+        catalog_refuses={"lakekeeper": _NO_GEO},
         effect=created(
             [
                 "g:geometry",
@@ -482,7 +484,9 @@ EFFECTS: dict[str, Effect] = {
         cols(plus=["c:int!=5 after m.value.a"]), setup=(V3, "ALTER TABLE foo.t DROP COLUMN c")
     ),
     "add_column_geometry_v3": t(
-        cols(plus=["g:geometry after m.value.a"]), setup=(V3,), catalog_refuses=_NO_GEO
+        cols(plus=["g:geometry after m.value.a"]),
+        setup=(V3,),
+        catalog_refuses={"lakekeeper": _NO_GEO},
     ),
     "alter_column_set_default": t(
         cols(minus=["c:int"], plus=["c:int=7 after measurement"]), setup=(V3,)

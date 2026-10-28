@@ -1,8 +1,8 @@
 """Fixtures for the integration test suite.
 
-These tests run against the docker-compose stack defined in ``docker/compose.yml``
-(Lakekeeper + rustfs + Postgres). The stack is brought up once per test session
-and torn down at the end.
+These tests run against the docker-compose stack of the catalog selected by
+``CAMBRIAN_TEST_CATALOG`` (see ``rig.py``; Lakekeeper by default). The stack is
+brought up once per test session and torn down at the end.
 
 If ``docker`` is not on ``PATH`` the whole integration suite is skipped, so
 contributors who only care about unit tests aren't blocked.
@@ -10,7 +10,6 @@ contributors who only care about unit tests aren't blocked.
 
 from __future__ import annotations
 
-import os
 import resource
 import shutil
 import subprocess
@@ -19,27 +18,17 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 from pyiceberg.catalog import Catalog
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-# Coordinates for the test rig as exposed to the host (compose maps these
-# ports out of the cambrian-test network). When talking to Lakekeeper from
-# inside the network the URLs would use the service names instead.
-LAKEKEEPER_HOST_URL = os.environ.get("CAMBRIAN_TEST_LAKEKEEPER_URL", "http://localhost:8181")
-RUSTFS_HOST_URL = os.environ.get("CAMBRIAN_TEST_RUSTFS_URL", "http://localhost:9000")
-WAREHOUSE_NAME = os.environ.get("CAMBRIAN_TEST_WAREHOUSE", "cambrian")
-RUSTFS_ACCESS_KEY = os.environ.get("CAMBRIAN_TEST_RUSTFS_ACCESS_KEY", "cambrian-access-key")
-RUSTFS_SECRET_KEY = os.environ.get("CAMBRIAN_TEST_RUSTFS_SECRET_KEY", "cambrian-secret-key")
-RUSTFS_REGION = os.environ.get("CAMBRIAN_TEST_RUSTFS_REGION", "local")
-
-COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker" / "compose.yml"
+from .rig import RIG
+from .rig import rest_catalog as rig_catalog
 
 # How long the per-step polling waits for individual services to become
-# ready (lakekeeper /health, bootstrap exit-zero). The whole stack should
+# ready (catalog health, bootstrap exit-zero). The whole stack should
 # settle in well under a minute on a warm-image laptop / runner.
 HEALTH_TIMEOUT_S = 90.0
 
@@ -96,20 +85,20 @@ def compose_stack() -> Iterator[None]:
     if not _docker_available():
         pytest.skip("docker is not on PATH; skipping integration tests")
 
-    if not COMPOSE_FILE.exists():
-        pytest.fail(f"compose file not found at {COMPOSE_FILE}")
+    if not RIG.compose_file.exists():
+        pytest.fail(f"compose file not found at {RIG.compose_file}")
 
-    compose_cmd = ["docker", "compose", "-f", str(COMPOSE_FILE)]
+    compose_cmd = ["docker", "compose", "-f", str(RIG.compose_file)]
 
     # We deliberately don't use ``up --wait`` here. ``--wait`` treats a
     # one-shot container (``bootstrap``) exiting as a stack failure even
-    # when it exits 0, so we poll for readiness ourselves: Lakekeeper
-    # /health for the long-running services, plus an explicit check that
-    # bootstrap exited successfully.
+    # when it exits 0, so we poll for readiness ourselves: the catalog's
+    # health endpoint for the long-running services, plus an explicit check
+    # that bootstrap exited successfully.
     subprocess.run([*compose_cmd, "up", "-d"], check=True)
 
     try:
-        _wait_for_http_ok(f"{LAKEKEEPER_HOST_URL}/health", HEALTH_TIMEOUT_S)
+        _wait_for_http_ok(RIG.health_url, HEALTH_TIMEOUT_S)
         _wait_for_bootstrap(compose_cmd, HEALTH_TIMEOUT_S)
         yield
     finally:
@@ -141,35 +130,13 @@ def _raise_open_file_limit() -> None:
 
 @pytest.fixture(scope="session")
 def rest_catalog(compose_stack: None) -> RestCatalog:
-    """A PyIceberg ``RestCatalog`` configured for the test rig.
+    """A PyIceberg ``RestCatalog`` for the rig, with static rustfs credentials.
 
-    The S3 credentials are set on the catalog client too so that PyArrow
-    file IO can talk to rustfs directly. Some Lakekeeper versions vend
-    short-lived credentials in the table-load response and the client
-    doesn't need its own, but pinning static creds here is robust against
-    that variability for the smoke test.
+    Pinning the S3 credentials on the client lets PyArrow reach rustfs
+    whether or not the catalog vends credentials in its load-table response.
     """
     del compose_stack  # ensures the fixture order: stack must be up
-    return RestCatalog(
-        name="cambrian-test",
-        **{
-            # Lakekeeper exposes the Iceberg REST API at /catalog. The
-            # warehouse is selected by the ``warehouse`` config below; the
-            # ``prefix`` Lakekeeper hands back from /v1/config encodes
-            # the warehouse id used in subsequent table URLs.
-            "uri": f"{LAKEKEEPER_HOST_URL}/catalog",
-            "warehouse": WAREHOUSE_NAME,
-            # PyIceberg auto-selects PyArrowFileIO for ``s3://`` table
-            # locations when no ``py-io-impl`` override is sent by the
-            # server, which is the case when the warehouse is configured
-            # with remote-signing disabled (see docker/bootstrap.sh).
-            "s3.endpoint": RUSTFS_HOST_URL,
-            "s3.access-key-id": RUSTFS_ACCESS_KEY,
-            "s3.secret-access-key": RUSTFS_SECRET_KEY,
-            "s3.region": RUSTFS_REGION,
-            "s3.path-style-access": "true",
-        },
-    )
+    return rig_catalog()
 
 
 def _drop_namespace_recursively(catalog: Catalog, namespace: str) -> None:

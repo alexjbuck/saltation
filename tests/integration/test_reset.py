@@ -21,7 +21,7 @@ from anyio import Event
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, CatalogConfig, DevConfig, EvolutionsConfig
+from cambrian.config import CambrianConfig, DevConfig, EvolutionsConfig
 from cambrian.errors import ExternalWriteDetectedError
 from cambrian.migrate.runner import (
     CURRENT_EVOLUTION_ID,
@@ -32,26 +32,15 @@ from cambrian.migrate.runner import (
 from cambrian.migrate.watch import WatchEvent, watch
 from cambrian.sidecar.events import latest_event
 
-LAKEKEEPER_URL = "http://localhost:8181"
-WAREHOUSE = "cambrian"
+from .rig import catalog_config
+from .rig import rest_catalog as rig_catalog
 
 
 def _build_config(
     *, evolutions_dir: Path, sidecar_namespace: str, debounce_ms: int = 100
 ) -> CambrianConfig:
     return CambrianConfig(
-        catalog=CatalogConfig(
-            type="rest",
-            uri=f"{LAKEKEEPER_URL}/catalog",
-            **{
-                "warehouse": WAREHOUSE,
-                "s3.endpoint": "http://localhost:9000",
-                "s3.access-key-id": "cambrian-access-key",
-                "s3.secret-access-key": "cambrian-secret-key",
-                "s3.region": "local",
-                "s3.path-style-access": "true",
-            },
-        ),
+        catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
             sidecar_namespace=sidecar_namespace,
@@ -66,18 +55,7 @@ def _write(path: Path, content: str) -> None:
 
 
 def _verify_catalog() -> RestCatalog:
-    return RestCatalog(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    return rig_catalog("verify")
 
 
 @pytest.fixture

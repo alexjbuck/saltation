@@ -30,6 +30,7 @@ from tests.fixtures.evolution_strategies import apply_script
 from tests.fixtures.iceberg_corpus import CORPUS, CorpusEntry
 
 from .conftest import _drop_namespace_recursively
+from .rig import RIG
 
 ENTRIES = [e for e in CORPUS if e.expected in {"apply", "invalid"}]
 PARAMS = [
@@ -37,7 +38,7 @@ PARAMS = [
         e,
         id=e.id,
         marks=[pytest.mark.xfail(strict=True, reason=reason)]
-        if (reason := EFFECTS[e.id].catalog_refuses if e.id in EFFECTS else None)
+        if (reason := EFFECTS[e.id].catalog_refuses.get(RIG.name) if e.id in EFFECTS else None)
         else [],
     )
     for e in ENTRIES
@@ -66,7 +67,7 @@ def _safe(fn: Callable[[], Any]) -> Any:
 
 def _subst(value: Any, ns: str) -> Any:
     if isinstance(value, str):
-        value = value.replace("s3://bucket/", f"s3://cambrian-warehouse/warehouse/{ns}/")
+        value = value.replace("s3://bucket/", f"{RIG.location_root}/{ns}/")
         return re.sub(r"\bfoo\b", ns, value)
     if isinstance(value, dict):
         return {_subst(k, ns): _subst(v, ns) for k, v in value.items()}
