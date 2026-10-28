@@ -99,7 +99,7 @@ def view_snapshot(catalog: Catalog, ident: Identifier) -> dict[str, Any] | None:
         cols += _field(f.name, f)
     return {
         "cols": cols,
-        "sql": {r.dialect: r.sql for r in version.representations},
+        "sql": {r.root.dialect: r.root.sql for r in version.representations},
         "props": dict(meta.properties),
         "versions": len(meta.versions),
     }

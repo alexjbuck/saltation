@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from tests.fixtures.catalog_state import ANY
 
-__all__ = ["BASES", "EFFECTS", "Effect"]
+__all__ = ["BASES", "EFFECTS", "VIEW_DIALECTS", "Effect"]
 
 Base = Literal["ns", "wide", "pair", "rows"]
 
@@ -116,6 +116,34 @@ V3 = "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')"
 # Lakekeeper rejects even a bare "geometry" schema type (HTTP 422). PyIceberg
 # 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none.
 _NO_GEO = "Lakekeeper v0.12.2 can't deserialize geometry/geography schema types"
+
+
+# Views store one SQL text per dialect; the effect tests store two so the
+# transpiled representation is checked as well.
+VIEW_DIALECTS = ("spark", "trino")
+VIEW_V = "CREATE VIEW foo.v AS SELECT id FROM foo.t"
+
+
+def view_created(
+    cols: list[str], sql: str, *, trino: str | None = None, props: dict[str, str] | None = None
+) -> dict[str, Any]:
+    return {
+        "exists": True,
+        "state": {
+            "cols": cols,
+            "sql": {"spark": sql, "trino": trino or sql},
+            "props": props or {},
+            "versions": 1,
+        },
+    }
+
+
+def both(old: str, new: str) -> dict[str, list[str]]:
+    return {"spark": [old, new], "trino": [old, new]}
+
+
+def v(effect: dict[str, Any], **kw: Any) -> Effect:
+    return Effect({"view:foo.v": effect}, **kw)
 
 
 def t(effect: dict[str, Any], **kw: Any) -> Effect:
@@ -468,6 +496,60 @@ EFFECTS: dict[str, Effect] = {
     ),
     "promote_date_bucketed": t(
         {}, setup=(V3, "ALTER TABLE foo.t ADD PARTITION FIELD bucket(4, d)")
+    ),
+    # --- views (stored as spark + trino; see VIEW_DIALECTS) ------------------
+    "view_create": v(view_created(["id:long", "name:string"], "SELECT id, name FROM foo.t")),
+    "view_create_existing": v({}, setup=(VIEW_V,)),
+    "view_create_if_not_exists": v({}, setup=(VIEW_V,)),
+    "view_create_or_replace": v(
+        {
+            "cols": {"-": [], "+": ["name:string after id"]},
+            "sql": both("SELECT id FROM foo.t", "SELECT id, name FROM foo.t"),
+            "versions": [1, 2],
+        },
+        setup=(VIEW_V,),
+    ),
+    "view_column_list": v(
+        view_created(
+            ["ident:long#the id", "nm:string"],
+            "SELECT id, name FROM foo.t",
+            props={"comment": "docs", "k": "v"},
+        )
+    ),
+    "view_unqualified_source": v(view_created(["id:long"], "SELECT id FROM t")),
+    "view_cast_external": v(
+        view_created(
+            ["k:string"],
+            "SELECT CAST(key AS STRING) AS k FROM ext.topic",
+            trino="SELECT TRY_CAST(key AS VARCHAR) AS k FROM ext.topic",
+        )
+    ),
+    "view_untyped_external": v({}),
+    "view_on_view": Effect(
+        {"view:foo.v2": view_created(["name:string"], "SELECT name FROM foo.v")},
+        setup=("CREATE VIEW foo.v AS SELECT id, name FROM foo.t",),
+    ),
+    "drop_view": v({"exists": False}, setup=(VIEW_V,)),
+    "drop_view_if_exists": v({"exists": False}, setup=(VIEW_V,)),
+    "alter_view_as": v(
+        {
+            "cols": {"-": [], "+": ["name:string after id"]},
+            "sql": both("SELECT id FROM foo.t", "SELECT id, name FROM foo.t"),
+            "versions": [1, 2],
+        },
+        setup=(VIEW_V,),
+    ),
+    "alter_view_set_properties": v({"props": {"k": [None, "v"]}}, setup=(VIEW_V,)),
+    "alter_view_unset_properties": v(
+        {"props": {"k": ["v", None]}},
+        setup=("CREATE VIEW foo.v TBLPROPERTIES ('k' = 'v', 'j' = 'w') AS SELECT id FROM foo.t",),
+    ),
+    "alter_view_rename": Effect(
+        {
+            "view:foo.v": {"exists": False},
+            "view:foo.w": view_created(["id:long"], "SELECT id FROM foo.t"),
+        },
+        setup=(VIEW_V,),
     ),
     # --- data ops ---------------------------------------------------------
     "insert_values_single": t({"rows": [0, 1]}, base="pair", reapply=False),

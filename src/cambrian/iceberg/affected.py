@@ -97,6 +97,9 @@ def affected_tables(statement: exp.Expression) -> list[TableIdent]:
     * ``INSERT INTO ... VALUES`` → one table.
     * ``CREATE NAMESPACE`` / ``DROP NAMESPACE`` → empty list (namespace
       operations don't touch a single table).
+    * ``CREATE/ALTER/DROP VIEW`` → empty list: a view has no snapshots to
+      checkpoint or roll back, and a re-run ``CREATE OR REPLACE VIEW``
+      converges on its own.
     * Anything else → empty list (dispatch will reject the statement).
     """
     if isinstance(statement, exp.Create) and _kind(statement) in {
@@ -110,6 +113,8 @@ def affected_tables(statement: exp.Expression) -> list[TableIdent]:
         "SCHEMA",
         "DATABASE",
     }:
+        return []
+    if isinstance(statement, exp.Create | exp.Drop | exp.Alter) and _kind(statement) == "VIEW":
         return []
 
     # CREATE TABLE — ``this`` is a Schema with ``this`` = Table.

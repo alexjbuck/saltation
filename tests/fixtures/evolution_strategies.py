@@ -15,6 +15,7 @@ applied into several isolated namespaces.
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -210,6 +211,7 @@ class Features:
     max_tables: int = 2
     # Format v3: create/upgrade v3 tables, column DEFAULTs, date -> timestamp.
     v3: bool = True
+    views: bool = True
 
 
 @dataclass
@@ -533,17 +535,32 @@ def evolution_scripts(
             continue
         statements.append(stmt)
 
-    return EvolutionScript(
-        statements=statements,
-        expected={name: m.fingerprint() for name, m in sorted(tables.items())},
-    )
+    expected: dict[str, dict[str, Any]] = {
+        name: m.fingerprint() for name, m in sorted(tables.items())
+    }
+    # Views last: a view's schema is inferred when it's applied, so a later
+    # ALTER of its source would (correctly) make a replay infer differently.
+    if features.views:
+        for name, t in sorted(tables.items()):
+            if not draw(st.booleans()):
+                continue
+            cols = draw(st.lists(st.sampled_from(t.columns), min_size=1, unique_by=id))
+            select = ", ".join(c.name for c in cols)
+            statements.append(
+                f"CREATE OR REPLACE VIEW {_q('v_' + name)} AS SELECT {select} FROM {_q(name)};"
+            )
+            expected[f"view:v_{name}"] = {
+                "columns": [(c.name, c.type.iceberg, False, None, None) for c in cols]
+            }
+
+    return EvolutionScript(statements=statements, expected=expected)
 
 
-def apply_script(catalog: Catalog, sql: str) -> None:
+def apply_script(catalog: Catalog, sql: str, view_dialects: Sequence[str] = ("spark",)) -> None:
     """Parse and dispatch *sql* statement-by-statement, mirroring the runner loop."""
     for stmt in sqlglot.parse(sql, dialect=CambrianSpark):
         if stmt is not None:
-            dispatch(catalog, stmt)
+            dispatch(catalog, stmt, view_dialects=view_dialects)
 
 
 def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str, Any]]:
@@ -573,5 +590,13 @@ def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str,
             ],
             "props": dict(sorted(props.items())),
             "identifier": sorted(schema.identifier_field_names()),
+        }
+    for ident in sorted(catalog.list_views(namespace)):
+        view_schema = catalog.load_view(ident).schema()
+        out[f"view:{ident[-1]}"] = {
+            "columns": [
+                (f.name, str(f.field_type), f.required, f.doc, f.write_default)
+                for f in view_schema.fields
+            ]
         }
     return out

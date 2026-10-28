@@ -1012,6 +1012,115 @@ CORPUS: list[CorpusEntry] = [
         "Spec: promotion is refused when a partition transform (bucket) would change values.",
     ),
     # =====================================================================
+    # Iceberg views (REST catalog)
+    # =====================================================================
+    CorpusEntry(
+        "view_create",
+        "view",
+        "CREATE VIEW foo.v AS SELECT id, name FROM foo.t",
+        "apply",
+        "Iceberg view on the REST catalog; schema inferred from foo.t.",
+    ),
+    CorpusEntry(
+        "view_create_existing",
+        "view",
+        "CREATE VIEW foo.v AS SELECT name FROM foo.t",
+        "apply",
+        "Plain CREATE leaves an existing view alone, as for tables.",
+    ),
+    CorpusEntry(
+        "view_create_if_not_exists",
+        "view",
+        "CREATE VIEW IF NOT EXISTS foo.v AS SELECT name FROM foo.t",
+        "apply",
+        "IF NOT EXISTS on an existing view is a no-op.",
+    ),
+    CorpusEntry(
+        "view_create_or_replace",
+        "view",
+        "CREATE OR REPLACE VIEW foo.v AS SELECT id, name FROM foo.t",
+        "apply",
+        "Adds a view version only when SQL/schema/properties change.",
+    ),
+    CorpusEntry(
+        "view_column_list",
+        "view",
+        "CREATE VIEW foo.v (ident COMMENT 'the id', nm) COMMENT 'docs' "
+        "TBLPROPERTIES ('k' = 'v') AS SELECT id, name FROM foo.t",
+        "apply",
+        "Spark view column list renames/comments output columns.",
+    ),
+    CorpusEntry(
+        "view_unqualified_source",
+        "view",
+        "CREATE VIEW foo.v AS SELECT id FROM t",
+        "apply",
+        "Unqualified sources resolve against the view's default namespace.",
+    ),
+    CorpusEntry(
+        "view_cast_external",
+        "view",
+        "CREATE VIEW foo.v AS SELECT CAST(key AS STRING) AS k FROM ext.topic",
+        "apply",
+        "Columns from outside the catalog are typed by CAST.",
+    ),
+    CorpusEntry(
+        "view_untyped_external",
+        "view",
+        "CREATE VIEW foo.v AS SELECT key FROM ext.topic",
+        "invalid",
+        "A column with no inferable type can't go in the view schema.",
+    ),
+    CorpusEntry(
+        "view_on_view",
+        "view",
+        "CREATE VIEW foo.v2 AS SELECT name FROM foo.v",
+        "apply",
+        "Views may read views; the source view's schema types the query.",
+    ),
+    CorpusEntry(
+        "drop_view",
+        "view",
+        "DROP VIEW foo.v",
+        "apply",
+        "Drops the view.",
+    ),
+    CorpusEntry(
+        "drop_view_if_exists",
+        "view",
+        "DROP VIEW IF EXISTS foo.v",
+        "apply",
+        "Drops the view; absent is a no-op.",
+    ),
+    CorpusEntry(
+        "alter_view_as",
+        "view",
+        "ALTER VIEW foo.v AS SELECT id, name FROM foo.t",
+        "apply",
+        "Spark ALTER VIEW ... AS: new version, properties kept.",
+    ),
+    CorpusEntry(
+        "alter_view_set_properties",
+        "view",
+        "ALTER VIEW foo.v SET TBLPROPERTIES ('k' = 'v')",
+        "apply",
+        "View properties.",
+    ),
+    CorpusEntry(
+        "alter_view_unset_properties",
+        "view",
+        "ALTER VIEW foo.v UNSET TBLPROPERTIES ('k')",
+        "apply",
+        "View properties.",
+    ),
+    CorpusEntry(
+        "alter_view_rename",
+        "view",
+        "ALTER VIEW foo.v RENAME TO foo.w",
+        "apply",
+        "REST views/rename.",
+    ),
+    # =====================================================================
     # NEGATIVE — out-of-scope writes
     # =====================================================================
     CorpusEntry(

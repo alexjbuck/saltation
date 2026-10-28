@@ -22,7 +22,7 @@ requires one schema change per commit. Each commit is a fresh transaction.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -118,7 +118,9 @@ class DispatchResult:
     notes: str = ""
 
 
-def dispatch(catalog: Catalog, statement: exp.Expression) -> DispatchResult:
+def dispatch(
+    catalog: Catalog, statement: exp.Expression, *, view_dialects: Sequence[str] = ("spark",)
+) -> DispatchResult:
     """Translate *statement* into PyIceberg calls and execute them.
 
     See module docstring for the idempotent contract.
@@ -142,6 +144,12 @@ def dispatch(catalog: Catalog, statement: exp.Expression) -> DispatchResult:
         "DATABASE",
     }:
         return _dispatch_drop_namespace(catalog, statement)
+
+    if isinstance(statement, exp.Create | exp.Drop | exp.Alter) and _kind(statement) == "VIEW":
+        # Imported here: the views module reuses this module's helpers.
+        from cambrian.sql.views import dispatch_view
+
+        return dispatch_view(catalog, statement, view_dialects)
 
     if isinstance(statement, exp.Create):
         return _dispatch_create_table(catalog, statement)

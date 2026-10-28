@@ -25,7 +25,7 @@ from tests.fixtures.catalog_state import (
     table_snapshot,
     view_snapshot,
 )
-from tests.fixtures.corpus_effects import BASES, EFFECTS, Effect
+from tests.fixtures.corpus_effects import BASES, EFFECTS, VIEW_DIALECTS, Effect
 from tests.fixtures.evolution_strategies import apply_script
 from tests.fixtures.iceberg_corpus import CORPUS, CorpusEntry
 
@@ -52,8 +52,6 @@ def test_every_positive_and_invalid_entry_has_an_effect() -> None:
 def ns(rest_catalog: RestCatalog) -> Iterator[str]:
     namespace = f"fx_{uuid.uuid4().hex[:10]}"
     yield namespace
-    for view in _safe(lambda: rest_catalog.list_views(namespace)) or []:
-        rest_catalog.drop_view(view)
     for child in _safe(lambda: rest_catalog.list_namespaces(namespace)) or []:
         _drop_namespace_recursively(rest_catalog, ".".join(child))
     _drop_namespace_recursively(rest_catalog, namespace)
@@ -95,24 +93,24 @@ def _snapshots(catalog: RestCatalog, targets: list[str]) -> dict[str, Any]:
 def test_corpus_entry_effect(rest_catalog: RestCatalog, ns: str, entry: CorpusEntry) -> None:
     effect: Effect = EFFECTS[entry.id]
     for sql in [*(BASES[effect.base] if effect.base else []), *effect.setup]:
-        apply_script(rest_catalog, _subst(sql, ns))
+        apply_script(rest_catalog, _subst(sql, ns), VIEW_DIALECTS)
     targets = list(_subst(list(effect.effects), ns))
     sql = _subst(entry.sql, ns)
     before = _snapshots(rest_catalog, targets)
 
     if entry.expected == "invalid":
         with pytest.raises(CambrianError) as info:
-            apply_script(rest_catalog, sql)
+            apply_script(rest_catalog, sql, VIEW_DIALECTS)
         assert not isinstance(info.value, UnsupportedStatementError), info.value
         assert _snapshots(rest_catalog, targets) == before
         return
 
-    apply_script(rest_catalog, sql)
+    apply_script(rest_catalog, sql, VIEW_DIALECTS)
     after = _snapshots(rest_catalog, targets)
     actual = {t: diff(before[t], after[t]) for t in targets}
     assert actual == _subst(effect.effects, ns)
 
     if effect.reapply:
-        apply_script(rest_catalog, sql)
+        apply_script(rest_catalog, sql, VIEW_DIALECTS)
         again = _snapshots(rest_catalog, targets)
         assert {t: diff(after[t], again[t]) for t in targets} == {t: {} for t in targets}

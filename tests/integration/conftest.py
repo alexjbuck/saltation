@@ -173,11 +173,13 @@ def rest_catalog(compose_stack: None) -> RestCatalog:
 
 
 def _drop_namespace_recursively(catalog: Catalog, namespace: str) -> None:
-    """Drop every table in *namespace* and then the namespace itself."""
+    """Drop every view and table in *namespace* and then the namespace itself."""
     try:
         identifiers = catalog.list_tables(namespace)
     except NoSuchNamespaceError:
         return
+    for view in catalog.list_views(namespace):
+        catalog.drop_view(view)
     for ident in identifiers:
         catalog.drop_table(ident)
     try:

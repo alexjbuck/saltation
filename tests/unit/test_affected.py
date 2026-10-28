@@ -9,6 +9,7 @@ Two layers under test:
 
 from __future__ import annotations
 
+import pytest
 import sqlglot
 
 from cambrian.iceberg.affected import (
@@ -210,3 +211,15 @@ def test_create_namespace_with_override() -> None:
     stmts = _parse(sql)
     result = affected_tables_with_overrides(sql, stmts)
     assert result == [[TableIdent(namespace="foo", name="x")]]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE OR REPLACE VIEW ns.v AS SELECT id FROM ns.t",
+        "DROP VIEW ns.v",
+        "ALTER VIEW ns.v SET TBLPROPERTIES ('k' = 'v')",
+    ],
+)
+def test_view_statements_affect_no_tables(sql: str) -> None:
+    assert affected_tables(sqlglot.parse_one(sql, dialect=CambrianSpark)) == []

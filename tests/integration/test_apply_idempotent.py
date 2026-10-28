@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig
+from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig, ViewsConfig
 from cambrian.errors import UnsupportedStatementError
 from cambrian.migrate import apply_idempotent
 from cambrian.sidecar.events import latest_event
@@ -324,3 +324,34 @@ def test_apply_emits_event_with_table_states(
     assert event.event_id == result.event_id
     assert event.evolution_hash == result.evolution_hash
     assert event.evolution_sql == sql
+
+
+def test_apply_creates_view_in_configured_dialects(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    """The runner threads [views].dialects through to CREATE VIEW, and re-apply is a no-op."""
+    evolutions = tmp_path / "evolutions"
+    _write_current(
+        evolutions,
+        f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
+        f"CREATE OR REPLACE VIEW {ns}.v AS SELECT id, upper(name) AS n FROM {ns}.t;\n",
+    )
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+    cfg = cfg.model_copy(update={"views": ViewsConfig(dialects=["spark", "trino"])})
+
+    assert apply_idempotent(cfg).status == "applied"
+    view = rest_catalog.load_view((ns, "v"))
+    dialects = {r.root.dialect for r in view.current_version().representations}
+    assert dialects == {"spark", "trino"}
+    assert [f.name for f in view.schema().fields] == ["id", "n"]
+
+    # Edit an unrelated line so the hash changes and the whole file re-runs.
+    _write_current(
+        evolutions,
+        f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
+        f"CREATE OR REPLACE VIEW {ns}.v AS SELECT id, upper(name) AS n FROM {ns}.t;\n"
+        f"CREATE TABLE IF NOT EXISTS {ns}.u (id BIGINT) USING iceberg;\n",
+    )
+    assert apply_idempotent(cfg).status == "applied"
+    assert len(rest_catalog.load_view((ns, "v")).metadata.versions) == 1
+    rest_catalog.drop_view((ns, "v"))

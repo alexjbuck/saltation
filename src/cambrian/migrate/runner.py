@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import getpass
 import socket
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -188,7 +188,7 @@ def apply_idempotent(
 
     for stmt, tables in zip(statements, per_stmt_tables, strict=True):
         try:
-            result = dispatch(catalog, stmt)
+            result = dispatch(catalog, stmt, view_dialects=config.views.dialects)
             statement_results.append(
                 StatementResult(
                     sql=_safe_sql(stmt),
@@ -328,6 +328,7 @@ def replay_committed(
             sources=[cf.path],
             allow_partial=allow_partial,
             actor=actor,
+            view_dialects=config.views.dialects,
         )
         results.append(
             CommittedApplyResult(
@@ -361,6 +362,7 @@ def _apply_one_committed_text(
     sources: list[Path],
     allow_partial: bool,
     actor: str | None,
+    view_dialects: Sequence[str],
 ) -> ApplyResult:
     """Dispatch one committed evolution's SQL and emit an ``apply`` event for it.
 
@@ -381,7 +383,7 @@ def _apply_one_committed_text(
 
     for stmt, tables in zip(statements, per_stmt_tables, strict=True):
         try:
-            result = dispatch(catalog, stmt)
+            result = dispatch(catalog, stmt, view_dialects=view_dialects)
             statement_results.append(
                 StatementResult(
                     sql=_safe_sql(stmt),

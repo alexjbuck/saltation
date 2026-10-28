@@ -29,7 +29,8 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlglot.dialects.dialect import Dialect
 
 from cambrian.errors import (
     ConfigNotFoundError,
@@ -152,6 +153,29 @@ class DevConfig(BaseModel):
     debounce_ms: int = Field(default=500, ge=0)
 
 
+class ViewsConfig(BaseModel):
+    """How ``CREATE VIEW`` stores its SQL.
+
+    An Iceberg view version holds one SQL text per dialect, and each engine
+    only reads the dialects it understands. The view body is written once in
+    cambrian's Spark SQL and transpiled by sqlglot into every listed dialect.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    dialects: list[str] = Field(default_factory=lambda: ["spark"], min_length=1)
+
+    @field_validator("dialects")
+    @classmethod
+    def _known_dialects(cls, value: list[str]) -> list[str]:
+        for name in value:
+            try:
+                Dialect.get_or_raise(name)
+            except ValueError as err:
+                raise ValueError(f"unknown sqlglot dialect {name!r} in [views].dialects") from err
+        return value
+
+
 class CambrianConfig(BaseModel):
     """Top-level cambrian config.
 
@@ -164,6 +188,7 @@ class CambrianConfig(BaseModel):
     catalog: CatalogConfig
     evolutions: EvolutionsConfig = Field(default_factory=EvolutionsConfig)
     dev: DevConfig = Field(default_factory=DevConfig)
+    views: ViewsConfig = Field(default_factory=ViewsConfig)
 
 
 # ---------------------------------------------------------------------------

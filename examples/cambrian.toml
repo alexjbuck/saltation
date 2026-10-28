@@ -40,3 +40,9 @@ sidecar_namespace = "_cambrian"
 mode        = "idempotent"
 watch       = true
 debounce_ms = 500
+
+[views]
+# SQL dialects each view version stores. A view's query is written once in
+# cambrian's Spark SQL and transpiled by sqlglot into every dialect listed;
+# an engine only reads views stored in a dialect it understands.
+dialects = ["spark"]

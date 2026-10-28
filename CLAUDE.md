@@ -104,7 +104,7 @@ is **never** the recommended fix — only the last resort.
 - Declarative-diff mode (desired state → computed evolutions)
 - Nessie / branch-based dev workflows
 - Cross-catalog evolutions
-- Views, RBAC, table maintenance ops as first-class concepts
+- RBAC, table maintenance ops as first-class concepts
 - Static idempotency lint checks
 - Multi-developer `current.sql` collaboration
 

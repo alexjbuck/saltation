@@ -377,3 +377,33 @@ def test_reset_unchanged_when_hash_matches(
     r2 = apply_reset(cfg)
     # Apply phase saw matching hash → "unchanged".
     assert r2.status == "unchanged", r2
+
+
+def test_reset_with_view_in_script(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    """Views aren't tables: reset rolls back the table and re-runs the view statement."""
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    _write(
+        current,
+        (
+            f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
+            f"INSERT INTO {ns}.t VALUES (0, 'seed');\n"
+            f"CREATE OR REPLACE VIEW {ns}.v AS SELECT id FROM {ns}.t;\n"
+        ),
+    )
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+    apply_idempotent(cfg)
+    _write(
+        current,
+        (
+            f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
+            f"INSERT INTO {ns}.t VALUES (1, 'alice');\n"
+            f"CREATE OR REPLACE VIEW {ns}.v AS SELECT id, name FROM {ns}.t;\n"
+        ),
+    )
+    result = apply_reset(cfg)
+    assert result.status == "applied", result
+    assert [f.name for f in rest_catalog.load_view((ns, "v")).schema().fields] == ["id", "name"]
+    rest_catalog.drop_view((ns, "v"))
