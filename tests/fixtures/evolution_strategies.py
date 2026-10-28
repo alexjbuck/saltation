@@ -144,6 +144,9 @@ class TableModel:
     # non-replayable (the ALTER hits a missing column on re-apply).
     altered: set[str] = field(default_factory=set)
     ever_identifier: set[str] = field(default_factory=set)
+    # Columns a SET NOT NULL has asserted; relaxing one later makes that
+    # statement fail on replay (Spark refuses optional -> required).
+    asserted_required: set[str] = field(default_factory=set)
     reordered: bool = False
     dropped_partitions: set[tuple[str, str]] = field(default_factory=set)
     next_col: int = 0
@@ -186,6 +189,7 @@ class Features:
     # earlier one's precondition, so the script can't be replayed. Per the
     # core principle that is reset-mode territory, not an idempotency bug.
     drop_after_alter: bool = False
+    # Also covers relaxing a column an earlier SET NOT NULL asserted.
     relax_former_identifier: bool = False
     multiple_reorders: bool = False
     # Re-adding a dropped partition field reorders the spec on replay.
@@ -362,10 +366,12 @@ def _step(draw: st.DrawFn, t: TableModel, features: Features) -> str | None:
         if not col.required:
             return None
         if draw(st.booleans()):
+            t.asserted_required.add(col.name)
             return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} SET NOT NULL;"
         if col.name in t.identifier:
             return None
-        if col.name in t.ever_identifier and not features.relax_former_identifier:
+        pinned_required = t.ever_identifier | t.asserted_required
+        if col.name in pinned_required and not features.relax_former_identifier:
             return None
         col.required = False
         return f"ALTER TABLE {tbl} ALTER COLUMN {col.name} DROP NOT NULL;"
