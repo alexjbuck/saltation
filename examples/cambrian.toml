@@ -46,3 +46,8 @@ debounce_ms = 500
 # cambrian's Spark SQL and transpiled by sqlglot into every dialect listed;
 # an engine only reads views stored in a dialect it understands.
 dialects = ["spark"]
+# Dialect view bodies are written in (default "spark"). Its representation is
+# stored verbatim, so existing views (e.g. Trino) migrate without rewrites.
+# Columns cambrian can't type from the catalog take a type in the view's
+# column list: CREATE VIEW v (id STRING, ts TIMESTAMP) AS <body>.
+# source_dialect = "trino"

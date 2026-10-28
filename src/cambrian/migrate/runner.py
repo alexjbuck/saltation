@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import sqlglot
 from pyiceberg.exceptions import NoSuchTableError
 from sqlglot import expressions as exp
 
@@ -48,9 +47,9 @@ from cambrian.sidecar.events import (
     write_event,
 )
 from cambrian.sidecar.selfmigrate import ensure_current
-from cambrian.sql.dialect import CambrianSpark
 from cambrian.sql.dispatch import dispatch
 from cambrian.sql.include import expand
+from cambrian.sql.script import parse_script
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -171,7 +170,7 @@ def apply_idempotent(
             applied_committed=replay_results,
         )
 
-    statements_raw = sqlglot.parse(expanded.text, dialect=CambrianSpark)
+    statements_raw = parse_script(expanded.text, view_source_dialect=config.views.source_dialect)
     statements = [s for s in statements_raw if s is not None]
 
     per_stmt_tables = affected_tables_with_overrides(expanded.text, statements)
@@ -329,6 +328,7 @@ def replay_committed(
             allow_partial=allow_partial,
             actor=actor,
             view_dialects=config.views.dialects,
+            view_source_dialect=config.views.source_dialect,
         )
         results.append(
             CommittedApplyResult(
@@ -363,13 +363,14 @@ def _apply_one_committed_text(
     allow_partial: bool,
     actor: str | None,
     view_dialects: Sequence[str],
+    view_source_dialect: str,
 ) -> ApplyResult:
     """Dispatch one committed evolution's SQL and emit an ``apply`` event for it.
 
     Mirrors the body of :func:`apply_idempotent` but keyed on a stable
     ``evolution_id`` (the ``NNNN_<slug>`` form) rather than ``"current"``.
     """
-    statements_raw = sqlglot.parse(text, dialect=CambrianSpark)
+    statements_raw = parse_script(text, view_source_dialect=view_source_dialect)
     statements = [s for s in statements_raw if s is not None]
     per_stmt_tables = affected_tables_with_overrides(text, statements)
 
@@ -712,7 +713,7 @@ def apply_reset(
     state = ensure_current(catalog, config.evolutions.sidecar_namespace, allow_read_only=False)
     namespace = state.sidecar_namespace
 
-    statements_raw = sqlglot.parse(expanded.text, dialect=CambrianSpark)
+    statements_raw = parse_script(expanded.text, view_source_dialect=config.views.source_dialect)
     statements = [s for s in statements_raw if s is not None]
     per_stmt_tables = affected_tables_with_overrides(expanded.text, statements)
     idents = _unique_tables(per_stmt_tables)

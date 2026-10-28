@@ -19,11 +19,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import sqlglot
 from hypothesis import strategies as st
 
-from cambrian.sql.dialect import CambrianSpark
 from cambrian.sql.dispatch import dispatch
+from cambrian.sql.script import parse_script
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -556,11 +555,15 @@ def evolution_scripts(
     return EvolutionScript(statements=statements, expected=expected)
 
 
-def apply_script(catalog: Catalog, sql: str, view_dialects: Sequence[str] = ("spark",)) -> None:
+def apply_script(
+    catalog: Catalog,
+    sql: str,
+    view_dialects: Sequence[str] = ("spark",),
+    view_source_dialect: str = "spark",
+) -> None:
     """Parse and dispatch *sql* statement-by-statement, mirroring the runner loop."""
-    for stmt in sqlglot.parse(sql, dialect=CambrianSpark):
-        if stmt is not None:
-            dispatch(catalog, stmt, view_dialects=view_dialects)
+    for stmt in parse_script(sql, view_source_dialect=view_source_dialect):
+        dispatch(catalog, stmt, view_dialects=view_dialects)
 
 
 def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str, Any]]:

@@ -15,6 +15,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from pyiceberg.catalog.rest import RestCatalog
+from pyiceberg.schema import assign_fresh_schema_ids
 
 from cambrian import __version__
 from cambrian.errors import DispatchError
@@ -54,7 +55,9 @@ def replace_view(
 ) -> None:
     """Add a new current version (and schema) to an existing view in one commit."""
     meta = view.metadata
-    schema_json = json.loads(schema.model_dump_json(by_alias=True))
+    # Field ids must be unique across nested types too; create_view does this
+    # itself, the raw commit doesn't.
+    schema_json = json.loads(assign_fresh_schema_ids(schema).model_dump_json(by_alias=True))
     schema_json["schema-id"] = max(s.schema_id for s in meta.schemas) + 1
     version = {
         "version-id": max(v.version_id for v in meta.versions) + 1,

@@ -53,6 +53,7 @@ from cambrian.sql.dispatch import (
     _scalar,
     _table_identifier,
 )
+from cambrian.sql.script import SOURCE_DIALECT, SOURCE_SQL
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -118,7 +119,9 @@ def _create_view(catalog: Catalog, stmt: exp.Create, dialects: Sequence[str]) ->
         if _matches(existing, schema, sqls, props):
             return DispatchResult(notes=f"view {name} unchanged (idempotent)")
         replace_view(rest, existing, schema, sqls, ident[:-1], props)
-        return DispatchResult(notes=f"replaced view {name} (dialects {sorted(sqls)})")
+        return DispatchResult(
+            notes=f"replaced view {name} (dialects {sorted(sqls)}){_untranslated(query, sqls)}"
+        )
 
     version = ViewVersion.model_validate(
         {
@@ -135,7 +138,9 @@ def _create_view(catalog: Catalog, stmt: exp.Create, dialects: Sequence[str]) ->
         rest.create_view(ident, schema=schema, view_version=version, properties=props)
     except ViewAlreadyExistsError:
         return DispatchResult(notes=f"view {name} already exists (concurrent create)")
-    return DispatchResult(notes=f"created view {name} (dialects {sorted(sqls)})")
+    return DispatchResult(
+        notes=f"created view {name} (dialects {sorted(sqls)}){_untranslated(query, sqls)}"
+    )
 
 
 def _drop_view(catalog: Catalog, stmt: exp.Drop) -> DispatchResult:
@@ -214,8 +219,24 @@ def _view_properties(node: exp.Expression | None) -> dict[str, str]:
     return props
 
 
+def _untranslated(query: exp.Query, sqls: dict[str, str]) -> str:
+    """Warn about functions sqlglot doesn't know: they're copied unchanged into
+    every transpiled dialect, which may not have them."""
+    targets = sorted(d for d in sqls if d != query.meta.get(SOURCE_DIALECT, "spark"))
+    unknown = sorted({f.name for f in query.find_all(exp.Anonymous)})
+    if not targets or not unknown:
+        return ""
+    return (
+        f"; WARNING: functions {unknown} copied untranslated into {targets} "
+        "(check those engines provide them)"
+    )
+
+
 def _representations(query: exp.Query, dialects: Sequence[str]) -> dict[str, str]:
-    return {d: query.sql(dialect=d) for d in dialects}
+    # The dialect the body was written in keeps its text verbatim; the others
+    # are transpiled from it.
+    source = query.meta.get(SOURCE_DIALECT)
+    return {d: query.meta[SOURCE_SQL] if d == source else query.sql(dialect=d) for d in dialects}
 
 
 def _matches(view: View, schema: Schema, sqls: dict[str, str], props: dict[str, str]) -> bool:
@@ -243,49 +264,63 @@ def _infer_schema(
     default_namespace: Identifier,
     columns: list[exp.Expression],
 ) -> Schema:
+    if columns and len(columns) != len(query.selects):
+        raise DispatchError(
+            f"view column list has {len(columns)} names but the query returns "
+            f"{len(query.selects)} columns"
+        )
+    declared = [_declared_type(c) for c in columns] or [None] * len(query.selects)
+    inferred = _inferred_types(catalog, query, default_namespace) if None in declared else {}
+    fields: list[NestedField] = []
+    for i, projection in enumerate(query.selects):
+        name = columns[i].name if columns else projection.alias_or_name
+        field_type = declared[i] or inferred.get(i)
+        if field_type is None:
+            raise DispatchError(
+                f"can't infer the type of view column {name!r} (it isn't read from an Iceberg "
+                "table or view in the catalog); CAST it in the query or give it a type in "
+                "the view's column list"
+            )
+        doc = (
+            _column_comment(columns[i])
+            if columns and isinstance(columns[i], exp.ColumnDef)
+            else None
+        )
+        fields.append(
+            NestedField(field_id=i + 1, name=name, field_type=field_type, required=False, doc=doc)
+        )
+    return Schema(*fields)
+
+
+def _declared_type(column: exp.Expression) -> IcebergType | None:
+    # Spark's view column list carries only names; cambrian also accepts a
+    # type, so views over sources outside the catalog keep their body as-is.
+    kind = column.args.get("kind") if isinstance(column, exp.ColumnDef) else None
+    return _iceberg_type_from_sqlglot(kind) if kind is not None else None
+
+
+def _inferred_types(
+    catalog: Catalog, query: exp.Query, default_namespace: Identifier
+) -> dict[int, IcebergType]:
+    dialect = query.meta.get(SOURCE_DIALECT) or CambrianSpark
     mapping = _source_schemas(catalog, query, default_namespace)
-    typed = query.copy()
     try:
         typed = qualify(
-            typed,
+            query.copy(),
             schema=mapping,
-            dialect=CambrianSpark,
+            dialect=dialect,
             db=".".join(default_namespace) or None,
             validate_qualify_columns=False,
         )
     except Exception as err:
         raise DispatchError(f"can't resolve the view's columns: {err}") from err
-    typed = annotate_types(typed, schema=mapping, dialect=CambrianSpark)
-    selects = typed.selects
-    if columns and len(columns) != len(selects):
-        raise DispatchError(
-            f"view column list has {len(columns)} names but the query returns "
-            f"{len(selects)} columns"
-        )
-    fields: list[NestedField] = []
-    for i, projection in enumerate(selects):
+    typed = annotate_types(typed, schema=mapping, dialect=dialect)
+    out: dict[int, IcebergType] = {}
+    for i, projection in enumerate(typed.selects):
         dtype = projection.type
-        name = projection.alias_or_name
-        if dtype is None or dtype.is_type(exp.DataType.Type.UNKNOWN):
-            raise DispatchError(
-                f"can't infer the type of view column {name!r} (it isn't read from an Iceberg "
-                "table or view in the catalog); CAST it in the query"
-            )
-        doc = None
-        if columns:
-            col = columns[i]
-            name = col.name
-            doc = _column_comment(col) if isinstance(col, exp.ColumnDef) else None
-        fields.append(
-            NestedField(
-                field_id=i + 1,
-                name=name,
-                field_type=_iceberg_type_from_sqlglot(dtype),
-                required=False,
-                doc=doc,
-            )
-        )
-    return Schema(*fields)
+        if dtype is not None and not dtype.is_type(exp.DataType.Type.UNKNOWN):
+            out[i] = _iceberg_type_from_sqlglot(dtype)
+    return out
 
 
 def _source_schemas(

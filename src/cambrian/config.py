@@ -164,16 +164,30 @@ class ViewsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dialects: list[str] = Field(default_factory=lambda: ["spark"], min_length=1)
+    # The dialect view bodies are written in. Its representation stores the
+    # body verbatim (handy for migrating existing views without rewriting
+    # them); the other dialects are transpiled from it.
+    source_dialect: str = "spark"
 
     @field_validator("dialects")
     @classmethod
     def _known_dialects(cls, value: list[str]) -> list[str]:
         for name in value:
-            try:
-                Dialect.get_or_raise(name)
-            except ValueError as err:
-                raise ValueError(f"unknown sqlglot dialect {name!r} in [views].dialects") from err
+            _check_dialect(name)
         return value
+
+    @field_validator("source_dialect")
+    @classmethod
+    def _known_source(cls, value: str) -> str:
+        _check_dialect(value)
+        return value
+
+
+def _check_dialect(name: str) -> None:
+    try:
+        Dialect.get_or_raise(name)
+    except ValueError as err:
+        raise ValueError(f"unknown sqlglot dialect {name!r} in [views]") from err
 
 
 class CambrianConfig(BaseModel):

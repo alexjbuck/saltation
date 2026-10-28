@@ -27,8 +27,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import sqlglot
-
 from cambrian.catalog import load_catalog
 from cambrian.errors import (
     CambrianError,
@@ -48,8 +46,8 @@ from cambrian.sidecar.events import (
     write_event,
 )
 from cambrian.sidecar.selfmigrate import ensure_current
-from cambrian.sql.dialect import CambrianSpark
 from cambrian.sql.include import expand
+from cambrian.sql.script import parse_script
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
@@ -283,7 +281,7 @@ def cambrian_commit(
 
     # Compute affected tables BEFORE moving the file so any parse error
     # leaves the working tree untouched.
-    statements_raw = sqlglot.parse(expanded.text, dialect=CambrianSpark)
+    statements_raw = parse_script(expanded.text, view_source_dialect=config.views.source_dialect)
     statements = [s for s in statements_raw if s is not None]
     per_stmt_tables = affected_tables_with_overrides(expanded.text, statements)
     idents = _unique_tables(per_stmt_tables)
