@@ -1151,9 +1151,8 @@ def rollback_to_last_checkpoint(
     """Undo ``current.sql``: restore the reset baseline without re-applying.
 
     Used by ``saltation rollback`` ("undo the dev work and re-edit
-    ``current.sql`` from scratch"). Objects touched only by idempotent
-    applies since the baseline began are not tracked; the next reset adds
-    them. Emits ``checkpoint`` and ``rollback`` events.
+    ``current.sql`` from scratch"). Committed evolutions applied this cycle
+    run again afterwards. Emits ``checkpoint`` and ``rollback`` events.
     """
     catalog = load_catalog(config)
     state = ensure_current(catalog, config.evolutions.sidecar_namespace, allow_read_only=False)

@@ -8,7 +8,8 @@ and after every step checks that:
   ``current.sql`` (or just the committed ones when nothing is applied);
 * the event log only ever grows, and no event already written changes;
 * the sidecar is at the current version (it may start at v1);
-* ``committed/`` holds exactly the model's committed evolutions.
+* ``committed/`` holds exactly the model's committed evolutions, text for
+  text, and uncommit puts the popped one back in ``current.sql``.
 """
 
 from __future__ import annotations
@@ -176,6 +177,8 @@ class Lifecycle(RuleBasedStateMachine):
     def uncommit(self) -> None:
         saltation_uncommit(self.config)
         self.current = self.committed.pop()
+        current = (self.dir / "current.sql").read_text(encoding="utf-8")
+        assert current == self.current.render(self.ns)
         self.extending = False
         self.applied = False
         self.live = self.top.expected
@@ -197,7 +200,8 @@ class Lifecycle(RuleBasedStateMachine):
     @invariant()
     def committed_files_match(self) -> None:
         files = discover_committed_files(self.dir / "committed")
-        assert len(files) == len(self.committed)
+        texts = [f.path.read_text(encoding="utf-8") for f in files]
+        assert texts == [s.render(self.ns) for s in self.committed]
 
     @invariant()
     def sidecar_is_current(self) -> None:

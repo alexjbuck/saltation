@@ -8,8 +8,9 @@ on:
     # Nightly soak: same suites, large Hypothesis budget (see tests/conftest.py).
     - cron: "17 7 * * *"
 
+# The event name keeps the nightly soak out of main's push group.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

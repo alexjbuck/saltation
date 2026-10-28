@@ -179,6 +179,7 @@ class TableModel:
             "props": dict(sorted(self.props.items())),
             "identifier": sorted(self.identifier),
             "rows": self.rows,
+            "fv": self.fv,
         }
 
 
@@ -676,6 +677,7 @@ def catalog_fingerprint(catalog: Catalog, namespace: str) -> dict[str, dict[str,
             "props": dict(sorted(props.items())),
             "identifier": sorted(schema.identifier_field_names()),
             "rows": _row_count(table),
+            "fv": table.format_version,
         }
     for ident in sorted(catalog.list_views(namespace)):
         view_schema = catalog.load_view(ident).schema()

@@ -16,8 +16,11 @@ on:
         description: "Existing release tag to publish, e.g. v0.2.0"
         required: true
 
+# Every closed PR into main starts this workflow. Only real releases share a
+# group: GitHub keeps one pending run per group, so a no-op run in it would
+# replace (cancel) a release queued behind one awaiting approval.
 concurrency:
-  group: release
+  group: ${{ (github.event_name == 'workflow_dispatch' || github.head_ref == 'release') && 'release' || format('release-noop-{0}', github.run_id) }}
   cancel-in-progress: false
 
 permissions:

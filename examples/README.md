@@ -93,7 +93,7 @@ saltation init --path saltation.toml
 
 ```text
 # expected:
-Initialized sidecar at _saltation (version=1)
+Initialized sidecar at _saltation (version=2)
 ```
 
 Three tables now exist under `_saltation`:
@@ -113,7 +113,7 @@ saltation init --path saltation.toml
 
 ```text
 # expected:
-Already initialized: sidecar at _saltation (version=1)
+Already initialized: sidecar at _saltation (version=2)
 ```
 
 ## Step 3: Your first evolution
@@ -261,7 +261,7 @@ saltation status --json --path saltation.toml
 {
   "initialized": true,
   "sidecar_namespace": "_saltation",
-  "sidecar_version": 1,
+  "sidecar_version": 2,
   "committed_count": 1,
   "committed_evolutions": [
     {

@@ -72,8 +72,7 @@ No API tokens are stored anywhere; the jobs mint short-lived ones via OIDC.
 In **Settings → Environments**, create:
 
 - `testpypi`, with no protection rules;
-- `pypi`, with **Required reviewers** set to whoever approves releases (and,
-  optionally, deployment branches limited to `main` plus tags `v*`).
+- `pypi`, with **Required reviewers** set to whoever approves releases.
 
 ### Release PR token
 
