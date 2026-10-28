@@ -109,3 +109,11 @@ def _toml_value(value: Any) -> str:
         pairs = ", ".join(f"{json.dumps(k)} = {_toml_value(v)}" for k, v in value.items())
         return "{ " + pairs + " }"
     return json.dumps(value)
+
+
+if __name__ == "__main__":
+    import sys
+
+    # For shell steps (the CI smoke run): `python -m tests.integration.rig compose|health|toml`.
+    outputs = {"compose": str(RIG.compose_file), "health": RIG.health_url, "toml": catalog_toml()}
+    print(outputs[sys.argv[1]], end="")

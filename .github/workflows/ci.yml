@@ -60,13 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - catalog: lakekeeper
-            compose: docker/compose.yml
-          - catalog: polaris
-            compose: docker/polaris/compose.yml
-          - catalog: gravitino
-            compose: docker/gravitino/compose.yml
+        catalog: [lakekeeper, polaris, gravitino]
     env:
       CAMBRIAN_TEST_CATALOG: ${{ matrix.catalog }}
     steps:
@@ -104,31 +98,33 @@ jobs:
         run: uv run pytest tests/integration -v
 
       - name: V1 smoke - cambrian apply --json
-        if: matrix.catalog == 'lakekeeper'
         # Re-bring up the stack (pytest's session fixture tore it down on
         # exit) and exercise the production code path end-to-end: the same
         # command and JSON-parse pipeline a CI deploy would run.
         env:
           UV_PROJECT_ENVIRONMENT: .venv
-          SMOKE_TOML: tests/fixtures/v1-smoke/cambrian.toml
         run: |
-          docker compose -f docker/compose.yml up -d
-          for _ in $(seq 1 60); do
-            if curl -fsS http://localhost:8181/health >/dev/null 2>&1 \
-              && docker compose -f docker/compose.yml ps -a \
+          compose=$(uv run python -m tests.integration.rig compose)
+          health=$(uv run python -m tests.integration.rig health)
+          smoke_toml="$RUNNER_TEMP/cambrian.toml"
+          { uv run python -m tests.integration.rig toml; cat tests/fixtures/v1-smoke/cambrian.toml; } > "$smoke_toml"
+          docker compose -f "$compose" up -d
+          for _ in $(seq 1 90); do
+            if curl -fsS "$health" >/dev/null 2>&1 \
+              && docker compose -f "$compose" ps -a \
                   --format '{{.Service}} {{.State}} {{.ExitCode}}' \
                   | grep -q '^bootstrap exited 0$'; then
               break
             fi
             sleep 2
           done
-          uv run cambrian init --path "$SMOKE_TOML"
-          uv run cambrian apply --json --path "$SMOKE_TOML" | tee /tmp/apply.json
+          uv run cambrian init --path "$smoke_toml"
+          uv run cambrian apply --json --path "$smoke_toml" | tee /tmp/apply.json
           status=$(jq -r .status /tmp/apply.json)
           test "$status" = "applied" || test "$status" = "unchanged"
-          uv run cambrian apply --json --path "$SMOKE_TOML" | tee /tmp/apply2.json
+          uv run cambrian apply --json --path "$smoke_toml" | tee /tmp/apply2.json
           test "$(jq -r .status /tmp/apply2.json)" = "unchanged"
 
       - name: Dump compose logs on failure
         if: failure()
-        run: docker compose -f ${{ matrix.compose }} logs --no-color || true
+        run: docker compose -f "$(uv run python -m tests.integration.rig compose)" logs --no-color || true
