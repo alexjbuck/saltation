@@ -459,3 +459,95 @@ def test_reset_after_uncommit_reapplies_the_popped_evolution(
 
     assert apply_reset(cfg).status == "applied"
     assert rest_catalog.table_exists((ns, "e0"))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "ALTER TABLE {ns}.t RENAME TO {ns}.moved",
+        "DROP TABLE {ns}.t",
+    ],
+    ids=["rename", "drop"],
+)
+def test_reset_repeats_a_rename_or_drop_of_its_own(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str, statement: str
+) -> None:
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    rest_catalog.load_table((ns, "t")).append(pa.table({"id": [7]}))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    _write(current, statement.format(ns=ns) + ";\n")
+    for _ in range(3):
+        assert apply_reset(cfg).status in {"applied", "unchanged"}
+        assert not rest_catalog.table_exists((ns, "t"))
+
+    _write(current, f"INSERT INTO {ns}.t VALUES (8);\n")
+    assert apply_reset(cfg).status == "applied"
+    rows = rest_catalog.load_table((ns, "t")).scan().to_arrow().column("id").to_pylist()
+    assert sorted(rows) == [7, 8]
+    assert not rest_catalog.table_exists((ns, "moved"))
+
+
+def test_reset_repeats_a_view_rename(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+    _write(current, f"CREATE VIEW {ns}.v AS SELECT id FROM {ns}.t;\n")
+    apply_idempotent(cfg)
+    saltation_commit(cfg, message="view")
+
+    _write(current, f"ALTER VIEW {ns}.v RENAME TO {ns}.w;\n")
+    assert apply_reset(cfg).status == "applied"
+    _write(current, f"ALTER VIEW {ns}.v RENAME TO {ns}.w2;\n")
+    assert apply_reset(cfg).status == "applied"
+    assert [i[-1] for i in rest_catalog.list_views(ns)] == ["w2"]
+
+
+def test_uncommit_restores_a_table_the_evolution_dropped(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+    _write(current, f"DROP TABLE IF EXISTS {ns}.t;\n")
+    apply_idempotent(cfg)
+    saltation_commit(cfg, message="drop t")
+
+    saltation_uncommit(cfg)
+    assert rest_catalog.table_exists((ns, "t"))
+    assert current.read_text(encoding="utf-8") == f"DROP TABLE IF EXISTS {ns}.t;\n"
+
+
+def test_reset_keeps_a_committed_evolution_pulled_mid_cycle(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    rest_catalog.create_table((ns, "t"), schema=pa.schema([("id", pa.int64())]))
+    evolutions = tmp_path / "evolutions"
+    current = evolutions / "current.sql"
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+
+    _write(current, f"ALTER TABLE {ns}.t ADD COLUMN mine STRING;\n")
+    assert apply_reset(cfg).status == "applied"
+    # A teammate's evolution arrives with `git pull`.
+    _write(
+        evolutions / "committed" / "0001_theirs.sql",
+        f"ALTER TABLE {ns}.t ADD COLUMN theirs INT;\nINSERT INTO {ns}.t VALUES (1, NULL);\n",
+    )
+    assert apply_reset(cfg).status == "applied"
+    _write(current, f"ALTER TABLE {ns}.t ADD COLUMN mine2 STRING;\n")
+    assert apply_reset(cfg).status == "applied"
+
+    table = rest_catalog.load_table((ns, "t"))
+    assert [f.name for f in table.schema().fields] == ["id", "theirs", "mine2"]
+    assert table.scan().to_arrow().num_rows == 1
+
+    assert rollback_to_last_checkpoint(cfg).status == "applied"
+    table = rest_catalog.load_table((ns, "t"))
+    assert [f.name for f in table.schema().fields] == ["id", "theirs"]
+    assert table.scan().to_arrow().num_rows == 1

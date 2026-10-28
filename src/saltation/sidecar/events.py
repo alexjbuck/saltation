@@ -67,6 +67,7 @@ class TableStateRow:
     object_kind: str = "table"
     pre_properties: dict[str, str] | None = None
     pre_view_version_id: int | None = None
+    pre_uuid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,7 @@ _TABLE_STATES_PA_SCHEMA = pa.schema(
         pa.field("object_kind", pa.string(), nullable=True),
         pa.field("pre_properties", pa.string(), nullable=True),
         pa.field("pre_view_version_id", pa.int64(), nullable=True),
+        pa.field("pre_uuid", pa.string(), nullable=True),
     ]
 )
 
@@ -250,6 +252,7 @@ def _table_states_to_arrow(event: _PendingEvent) -> pa.Table:
                 type=pa.string(),
             ),
             "pre_view_version_id": pa.array([r.pre_view_version_id for r in rows], type=pa.int64()),
+            "pre_uuid": pa.array([r.pre_uuid for r in rows], type=pa.string()),
         },
         schema=_TABLE_STATES_PA_SCHEMA,
     )
@@ -444,6 +447,7 @@ def table_states_for_event(
             object_kind=r.get("object_kind") or "table",
             pre_properties=json.loads(r["pre_properties"]) if r.get("pre_properties") else None,
             pre_view_version_id=r.get("pre_view_version_id"),
+            pre_uuid=r.get("pre_uuid"),
         )
         for r in rows
     ]

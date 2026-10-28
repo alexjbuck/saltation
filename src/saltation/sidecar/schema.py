@@ -117,11 +117,12 @@ def _v0_to_v1_initial(catalog: Catalog, namespace: str) -> None:
 # ``current.sql`` was first applied, beyond the four pointers. ``object_kind``
 # is "table" (or null, for v1 rows) or "view"; ``pre_properties`` is the
 # table's properties as a JSON object; ``pre_view_version_id`` is a view's
-# current version.
+# current version; ``pre_uuid`` is the table/view UUID, which a rename keeps.
 TABLE_STATES_V2_FIELDS = (
     NestedField(field_id=14, name="object_kind", field_type=StringType(), required=False),
     NestedField(field_id=15, name="pre_properties", field_type=StringType(), required=False),
     NestedField(field_id=16, name="pre_view_version_id", field_type=LongType(), required=False),
+    NestedField(field_id=17, name="pre_uuid", field_type=StringType(), required=False),
 )
 
 

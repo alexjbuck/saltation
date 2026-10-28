@@ -21,7 +21,7 @@ import socket
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 from pyiceberg.exceptions import NoSuchTableError, NoSuchViewError
 from pyiceberg.serializers import FromInputFile
@@ -41,7 +41,7 @@ from saltation.iceberg.affected import (
 )
 from saltation.iceberg.checkpoint import Checkpoint, capture, pin
 from saltation.iceberg.txn import Prune, restore_pointers
-from saltation.iceberg.views import require_rest
+from saltation.iceberg.views import rename_view, require_rest
 from saltation.iceberg.views import set_current_version as set_current_view_version
 from saltation.sidecar.events import (
     Event,
@@ -79,6 +79,10 @@ __all__ = [
 # Evolution id used for the dev-loop ``current.sql`` slot. Reset's checkpoint
 # tag is ``saltation.cp.<evolution_id>`` (per CLAUDE.md) → ``saltation.cp.current``.
 CURRENT_EVOLUTION_ID = "current"
+
+# A table saltation itself left dropped (or renamed away).
+GONE: Final = "gone"
+Expected = int | None | Literal["gone"]
 CHECKPOINT_TAG_PREFIX = "saltation.cp."
 
 
@@ -132,6 +136,7 @@ def apply_idempotent(
     allow_partial: bool = False,
     actor: str | None = None,
     rerun: bool = False,
+    rerun_committed: frozenset[str] = frozenset(),
 ) -> ApplyResult:
     """Apply committed evolutions + ``current.sql`` in idempotent mode.
 
@@ -168,6 +173,7 @@ def apply_idempotent(
         namespace=namespace,
         allow_partial=allow_partial,
         actor=actor,
+        rerun=rerun_committed,
     )
 
     current_sql_path = _resolve_current_sql(config)
@@ -284,8 +290,12 @@ def replay_committed(
     namespace: str,
     allow_partial: bool = False,
     actor: str | None = None,
+    rerun: frozenset[str] = frozenset(),
 ) -> list[CommittedApplyResult]:
     """Replay every committed evolution not yet recorded in the events log.
+
+    Evolutions in *rerun* run again even though they're recorded: reset has
+    just restored tables to a baseline taken before they were applied.
 
     Walks ``committed/`` lexicographically. For each ``NNNN_<slug>.sql``:
 
@@ -314,7 +324,7 @@ def replay_committed(
         digest = _sha256_hex(text)
 
         prior_hash = applied.get(cf.evolution_id)
-        if prior_hash is not None:
+        if prior_hash is not None and (prior_hash != digest or cf.evolution_id not in rerun):
             if prior_hash != digest:
                 raise IllegalStateError(
                     f"committed file {cf.path.name} has been edited since it was applied "
@@ -513,6 +523,7 @@ class _TableStateAccumulator:
     pre_sort_order_id: int | None = None
     pre_metadata_loc: str | None = None
     pre_properties: dict[str, str] | None = None
+    pre_uuid: str | None = None
     post_snapshot_id: int | None = None
     post_schema_id: int | None = None
     post_spec_id: int | None = None
@@ -537,6 +548,7 @@ class _TableStateAccumulator:
             pre_sort_order_id=self.pre_sort_order_id,
             pre_metadata_loc=self.pre_metadata_loc,
             pre_properties=self.pre_properties,
+            pre_uuid=self.pre_uuid,
             post_snapshot_id=self.post_snapshot_id,
             post_schema_id=self.post_schema_id,
             post_spec_id=self.post_spec_id,
@@ -556,6 +568,7 @@ def _capture_pre(catalog: Catalog, ident: TableIdent) -> _TableStateAccumulator:
     acc.pre_sort_order_id = cp.sort_order_id
     acc.pre_metadata_loc = cp.metadata_loc
     acc.pre_properties = dict(table.properties)
+    acc.pre_uuid = str(table.metadata.table_uuid)
     return acc
 
 
@@ -682,6 +695,7 @@ def _pre_only(row: TableStateRow) -> TableStateRow:
         pre_metadata_loc=row.pre_metadata_loc,
         pre_properties=row.pre_properties,
         pre_view_version_id=row.pre_view_version_id,
+        pre_uuid=row.pre_uuid,
     )
 
 
@@ -703,6 +717,7 @@ def _baseline_table_row(catalog: Catalog, ident: TableIdent) -> TableStateRow:
         pre_sort_order_id=cp.sort_order_id,
         pre_metadata_loc=cp.metadata_loc,
         pre_properties=dict(table.properties),
+        pre_uuid=str(table.metadata.table_uuid),
         tag_ref=tag if cp.snapshot_id is not None else None,
     )
 
@@ -716,6 +731,7 @@ def _baseline_view_row(catalog: Catalog, ident: TableIdent) -> TableStateRow:
         table_ident=str(ident),
         object_kind="view",
         pre_view_version_id=view.metadata.current_version_id,
+        pre_uuid=str(view.metadata.view_uuid),
     )
 
 
@@ -774,8 +790,56 @@ def _exists(catalog: Catalog, row: TableStateRow) -> bool:
     return catalog.table_exists(ident)
 
 
+def _undo_own_moves(catalog: Catalog, baseline: _Baseline) -> list[TableRollback]:
+    """Bring back baselined objects that ``current.sql`` itself renamed away or dropped.
+
+    A rename keeps the object's UUID, so a renamed table or view shows up as
+    an object that didn't exist at the baseline carrying a lost one's UUID.
+    A dropped table is re-registered from its baseline metadata file.
+    """
+    lost = [r for r in baseline.values() if _existed(r) and not _exists(catalog, r)]
+    if not lost:
+        return []
+    arrived = {
+        (r.object_kind, uuid): r
+        for r in baseline.values()
+        if not _existed(r)
+        and _exists(catalog, r)
+        and (uuid := _current_uuid(catalog, r)) is not None
+    }
+    out: list[TableRollback] = []
+    for row in lost:
+        ident = _ident_str_to_tuple(row.table_ident)
+        moved = arrived.get((row.object_kind, row.pre_uuid)) if row.pre_uuid else None
+        if moved is not None:
+            source = _ident_str_to_tuple(moved.table_ident)
+            if row.object_kind == "view":
+                rename_view(require_rest(catalog), source, ident)
+            else:
+                catalog.rename_table(source, ident)
+            reason = f"renamed back from {moved.table_ident}"
+        elif row.object_kind == "table" and row.pre_metadata_loc is not None:
+            try:
+                catalog.register_table(ident, row.pre_metadata_loc)
+            except Exception:
+                continue
+            reason = "re-registered after current.sql dropped it"
+        else:
+            continue
+        out.append(TableRollback(ident=row.table_ident, rolled_back=True, reason=reason))
+    return out
+
+
+def _current_uuid(catalog: Catalog, row: TableStateRow) -> str | None:
+    ident = _ident_str_to_tuple(row.table_ident)
+    if row.object_kind == "view":
+        return str(catalog.load_view(ident).metadata.view_uuid)
+    return str(catalog.load_table(ident).metadata.table_uuid)
+
+
 def _restore_baseline(catalog: Catalog, baseline: _Baseline) -> list[TableRollback]:
     """Put every baselined object back the way it was before ``current.sql``."""
+    undone = _undo_own_moves(catalog, baseline)
     lost = sorted(
         f"{r.object_kind} {r.table_ident}"
         for r in baseline.values()
@@ -801,7 +865,7 @@ def _restore_baseline(catalog: Catalog, baseline: _Baseline) -> list[TableRollba
         )
         raise IllegalStateError(msg)
 
-    rollbacks: list[TableRollback] = []
+    rollbacks: list[TableRollback] = undone
     for row in baseline.values():
         ident = _ident_str_to_tuple(row.table_ident)
         if not _existed(row):
@@ -880,44 +944,58 @@ def _row_to_checkpoint(row: TableStateRow) -> Checkpoint | None:
     )
 
 
-def _load_post_snapshots(
-    catalog: Catalog,
-    namespace: str,
-    *,
-    evolution_id: str,
-) -> dict[str, int | None]:
-    """Return {ident_str: post_snapshot_id} from the most recent ``apply`` for *evolution_id*.
-
-    Used by external-write detection: compare each table's current main
-    snapshot against the *post* state recorded by the prior apply. A
-    divergence means someone else wrote between then and now.
-    """
-    prior = latest_event(catalog, namespace, event_type="apply", evolution_id=evolution_id)
-    if prior is None:
-        return {}
-    rows = table_states_for_event(catalog, namespace, event_id=prior.event_id)
-    return {row.table_ident: row.post_snapshot_id for row in rows if row.object_kind == "table"}
-
-
 def _expected_snapshots(
     catalog: Catalog, namespace: str, baseline: _Baseline
-) -> dict[str, int | None]:
-    """Where saltation last left each table's ``main``: the last apply, or a rollback after it."""
+) -> dict[str, Expected]:
+    """Where saltation last left each table's ``main`` this dev cycle.
+
+    Replays the cycle's applies (current.sql and committed evolutions) and
+    rollbacks in order; tables saltation hasn't touched since the last commit
+    or uncommit have no expectation.
+    """
     in_cycle = _in_cycle(catalog, namespace)
-    last = latest_event(catalog, namespace, event_type="apply", evolution_id=CURRENT_EVOLUTION_ID)
-    undo = latest_event(
-        catalog, namespace, event_type="rollback", evolution_id=CURRENT_EVOLUTION_ID
+    cycle = [
+        e
+        for e in events(catalog, namespace)
+        if in_cycle(e)
+        and (
+            e.event_type == "apply"
+            or (e.event_type == "rollback" and e.evolution_id == CURRENT_EVOLUTION_ID)
+        )
+    ]
+    expected: dict[str, Expected] = {}
+    for event in cycle:
+        if event.event_type == "rollback":
+            expected = {
+                ident: row.pre_snapshot_id if _existed(row) else GONE
+                for (kind, ident), row in baseline.items()
+                if kind == "table"
+            }
+            continue
+        for row in table_states_for_event(catalog, namespace, event_id=event.event_id):
+            if row.object_kind == "table":
+                expected[row.table_ident] = (
+                    GONE if row.post_schema_id is None else row.post_snapshot_id
+                )
+    return expected
+
+
+def _pending_committed(config: SaltationConfig, catalog: Catalog, namespace: str) -> bool:
+    from saltation.migrate.commit import discover_committed_files
+
+    files = discover_committed_files(Path(config.evolutions.dir).resolve() / "committed")
+    applied = applied_committed_ids(catalog, namespace)
+    return any(cf.evolution_id not in applied for cf in files)
+
+
+def _committed_in_cycle(catalog: Catalog, namespace: str) -> frozenset[str]:
+    """Committed evolutions applied since the last commit/uncommit (e.g. after a pull)."""
+    in_cycle = _in_cycle(catalog, namespace)
+    return frozenset(
+        e.evolution_id
+        for e in events(catalog, namespace, event_type="apply")
+        if e.evolution_id != CURRENT_EVOLUTION_ID and in_cycle(e)
     )
-    if not in_cycle(last):
-        # A commit or uncommit since then put the tables where they are.
-        return {}
-    if in_cycle(undo) and undo is not None and last is not None and undo.event_ts > last.event_ts:
-        return {
-            ident: row.pre_snapshot_id
-            for (kind, ident), row in baseline.items()
-            if kind == "table" and _existed(row)
-        }
-    return _load_post_snapshots(catalog, namespace, evolution_id=CURRENT_EVOLUTION_ID)
 
 
 def _write_baseline(
@@ -1009,7 +1087,10 @@ def apply_reset(
             observed_snapshot_id=None,
         )
 
-    if not diverged and _applied_and_standing(catalog, namespace, expanded.hash):
+    # Newly committed evolutions (e.g. after a pull) must run on the restored
+    # baseline, ahead of current.sql, so they rule out the shortcut.
+    pending = _pending_committed(config, catalog, namespace)
+    if not diverged and not pending and _applied_and_standing(catalog, namespace, expanded.hash):
         return ResetResult(
             status="unchanged", evolution_hash=expanded.hash, sources=expanded.sources
         )
@@ -1034,7 +1115,11 @@ def apply_reset(
 
     try:
         apply_result = apply_idempotent(
-            config, allow_partial=allow_partial, actor=actor, rerun=True
+            config,
+            allow_partial=allow_partial,
+            actor=actor,
+            rerun=True,
+            rerun_committed=_committed_in_cycle(catalog, namespace),
         )
     except SaltationError as err:
         return ResetResult(
@@ -1079,6 +1164,7 @@ def rollback_to_last_checkpoint(
     if prior is None or not baseline:
         return ResetResult(status="unchanged", evolution_hash="", sources=[], rollbacks=[])
 
+    rerun = _committed_in_cycle(catalog, namespace)
     rollbacks = _restore_baseline(catalog, baseline)
     event_id = _write_baseline(
         catalog,
@@ -1089,6 +1175,7 @@ def rollback_to_last_checkpoint(
         actor=actor or _default_actor(),
         rollbacks=rollbacks,
     )
+    replay_committed(config, catalog=catalog, namespace=namespace, actor=actor, rerun=rerun)
     return ResetResult(
         status="applied",
         evolution_hash=prior.evolution_hash,
@@ -1106,7 +1193,7 @@ def _split(ident: str) -> tuple[str | None, str]:
 def _check_external_writes(
     catalog: Catalog,
     idents: list[TableIdent],
-    prior_post_snapshots: dict[str, int | None],
+    prior_post_snapshots: dict[str, Expected],
 ) -> list[str]:
     """Return the list of table idents whose current snapshot diverges from prior.
 
@@ -1121,10 +1208,11 @@ def _check_external_writes(
             continue
         expected = prior_post_snapshots[ident_str]
         table = _load_or_none(catalog, ident)
-        if table is None:
-            # The prior apply touched this table, but it's gone now —
-            # that's a strong "external write" signal (someone DROPped it).
+        if (table is None) != (expected is GONE):
+            # Dropped, or recreated, by someone other than saltation.
             diverged.append(ident_str)
+            continue
+        if table is None:
             continue
         snap = table.current_snapshot()
         observed = snap.snapshot_id if snap is not None else None
