@@ -77,6 +77,14 @@ is **never** the recommended fix — only the last resort.
 - **Object storage: rustfs, NOT MinIO.** MinIO's CE licensing changes make
   it a non-option. Use the `rustfs/rustfs` Docker image (S3-API-compatible).
 - **Catalog: Lakekeeper** (user runs it in production). REST catalog.
+  The same integration suite also runs against **Polaris** and
+  **Gravitino** (each pinned to its latest stable release, one parallel
+  CI job per catalog). `CAMBRIAN_TEST_CATALOG` picks the rig; stacks
+  live in `docker/` (Lakekeeper) and `docker/<catalog>/`, and their client
+  properties live in `tests/integration/rig.py`. A genuine catalog refusal
+  goes in the corpus entry's `catalog_refuses`, keyed by catalog. Unity
+  Catalog is left out: its server can't reach an S3-compatible store
+  through a custom endpoint, and it has no views.
 - **Bootstrap**: Lakekeeper requires `POST /management/v1/bootstrap` then
   `POST /management/v1/warehouse`. Non-idempotent — bootstrap container
   tolerates 409s.

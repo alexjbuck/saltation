@@ -1,0 +1,140 @@
+# Integration-test rig for cambrian against Apache Polaris.
+#
+# Services:
+#   rustfs          - S3-compatible object storage (warehouse data lives here)
+#   rustfs-init     - one-shot: creates the warehouse bucket on rustfs
+#   polaris         - Iceberg REST catalog (in-memory metastore, auto-bootstrapped)
+#   bootstrap       - one-shot: creates the catalog + grants via the management API
+#
+# Version pins (chosen 2026-10-28):
+#   rustfs/rustfs:1.0.0-beta.4 - matches the Lakekeeper rig
+#   apache/polaris:1.8.0       - latest stable release (Docker Hub, 2026-09-28)
+#
+# Persistence is in-memory: catalog state lives as long as the polaris
+# container. A restart wipes it; rerun the bootstrap service afterwards.
+#
+# Storage endpoints: Polaris itself talks to rustfs over the docker network
+# (``endpointInternal`` = http://rustfs:9000) while the endpoint it hands to
+# clients in loadTable config is http://localhost:9000 (``endpoint``). That
+# split removes the need for the host.docker.internal trick used by the
+# Lakekeeper rig.
+
+name: cambrian-test-polaris
+
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.4
+    environment:
+      RUSTFS_ACCESS_KEY: cambrian-access-key
+      RUSTFS_SECRET_KEY: cambrian-secret-key
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null -w '%{http_code}' http://localhost:9000/ | grep -E '^(200|403)$'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    ports:
+      - "9000:9000"
+    networks:
+      - cambrian
+
+  rustfs-init:
+    image: amazon/aws-cli:2.17.16
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: cambrian-access-key
+      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_DEFAULT_REGION: local
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "[rustfs-init] creating bucket s3://cambrian-warehouse on rustfs ..."
+        out=$$(aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket cambrian-warehouse 2>&1) && rc=0 || rc=$$?
+        echo "$$out"
+        if [ "$$rc" -eq 0 ]; then
+          echo "[rustfs-init] bucket created"
+          exit 0
+        fi
+        if echo "$$out" | grep -qE 'BucketAlreadyOwnedByYou|BucketAlreadyExists'; then
+          echo "[rustfs-init] bucket already exists - OK"
+          exit 0
+        fi
+        echo "[rustfs-init] FAILED to create bucket (rc=$$rc)"
+        exit "$$rc"
+    networks:
+      - cambrian
+
+  polaris:
+    image: apache/polaris:1.8.0
+    depends_on:
+      rustfs:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+    environment:
+      # In-memory is the image default and the only type auto-bootstrapped
+      # on startup (polaris.persistence.auto-bootstrap-types=in-memory).
+      POLARIS_PERSISTENCE_TYPE: in-memory
+      # realm,client_id,client_secret for the root principal. Fixed values
+      # make the token request deterministic across runs.
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,cambrian-polaris-secret
+      polaris.realm-context.realms: POLARIS
+      quarkus.otel.sdk.disabled: "true"
+      # The catalog is created with stsUnavailable=true, so Polaris's own
+      # FileIO (metadata.json writes) falls back to the AWS SDK default
+      # credential chain - i.e. these env vars.
+      AWS_ACCESS_KEY_ID: cambrian-access-key
+      AWS_SECRET_ACCESS_KEY: cambrian-secret-key
+      AWS_REGION: local
+      # PyIceberg's purge_table / DROP TABLE ... PURGE is rejected with 403
+      # unless this is on.
+      polaris.features."DROP_WITH_PURGE_ENABLED": "true"
+    healthcheck:
+      # Quarkus management interface (health) is on 8182, API on 8181.
+      test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+    ports:
+      - "8181:8181"
+      - "8182:8182"
+    networks:
+      - cambrian
+
+  bootstrap:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      polaris:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      POLARIS_URL: http://polaris:8181
+      POLARIS_REALM: POLARIS
+      POLARIS_CLIENT_ID: root
+      POLARIS_CLIENT_SECRET: cambrian-polaris-secret
+      CATALOG_NAME: cambrian
+      RUSTFS_BUCKET: cambrian-warehouse
+      KEY_PREFIX: polaris
+      # Endpoint Polaris uses itself (in-network).
+      INTERNAL_S3_ENDPOINT: http://rustfs:9000
+      # Endpoint vended to clients as s3.endpoint in loadTable config.
+      CLIENT_S3_ENDPOINT: http://localhost:9000
+      S3_REGION: local
+      STS_UNAVAILABLE: "true"
+    volumes:
+      - ./bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    networks:
+      - cambrian
+
+networks:
+  cambrian:
+    name: cambrian-test-polaris

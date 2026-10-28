@@ -12,6 +12,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pyiceberg.catalog.rest import RestCatalog
 
@@ -38,7 +39,7 @@ class Rig:
     health_url: str
     # Where the catalog lets a client put an explicit table location.
     location_root: str
-    properties: dict[str, str] = field(default_factory=dict)
+    properties: dict[str, Any] = field(default_factory=dict)
 
 
 RIGS = {
@@ -49,12 +50,37 @@ RIGS = {
         location_root="s3://cambrian-warehouse/warehouse",
         properties={"uri": "http://localhost:8181/catalog", "warehouse": "cambrian", **_S3},
     ),
+    "gravitino": Rig(
+        name="gravitino",
+        compose_file=_DOCKER / "gravitino" / "compose.yml",
+        health_url="http://localhost:8181/iceberg/v1/config",
+        location_root="s3://cambrian-warehouse/warehouse",
+        # PyIceberg 0.12 sends "Authorization: Bearer None" without an auth
+        # config; Gravitino rejects it where Lakekeeper ignores it.
+        properties={"uri": "http://localhost:8181/iceberg", "auth": {"type": "noop"}, **_S3},
+    ),
+    "polaris": Rig(
+        name="polaris",
+        compose_file=_DOCKER / "polaris" / "compose.yml",
+        health_url="http://localhost:8182/q/health",
+        location_root="s3://cambrian-warehouse/polaris",
+        properties={
+            "uri": "http://localhost:8181/api/catalog",
+            "warehouse": "cambrian",
+            "credential": "root:cambrian-polaris-secret",
+            "scope": "PRINCIPAL_ROLE:ALL",
+            # The rig has no STS to vend credentials from; PyIceberg asks for
+            # them by default and Polaris refuses the table load.
+            "header.X-Iceberg-Access-Delegation": "",
+            **_S3,
+        },
+    ),
 }
 
 RIG = RIGS[os.environ.get("CAMBRIAN_TEST_CATALOG", "lakekeeper")]
 
 
-def catalog_properties() -> dict[str, str]:
+def catalog_properties() -> dict[str, Any]:
     return dict(RIG.properties)
 
 
@@ -69,5 +95,12 @@ def catalog_config() -> CatalogConfig:
 def catalog_toml() -> str:
     """The ``[catalog]`` table of a cambrian.toml pointing at the rig."""
     lines = ["[catalog]", 'type = "rest"']
-    lines += [f"{json.dumps(k)} = {json.dumps(v)}" for k, v in catalog_properties().items()]
+    lines += [f"{json.dumps(k)} = {_toml_value(v)}" for k, v in catalog_properties().items()]
     return "\n".join(lines) + "\n"
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, dict):
+        pairs = ", ".join(f"{json.dumps(k)} = {_toml_value(v)}" for k, v in value.items())
+        return "{ " + pairs + " }"
+    return json.dumps(value)
