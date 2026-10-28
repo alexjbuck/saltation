@@ -14,6 +14,7 @@ EXISTS`` leave an existing view alone, as for tables.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -272,41 +273,49 @@ def _infer_schema(
     default_namespace: Identifier,
     columns: list[exp.Expression],
 ) -> Schema:
-    width = len(columns) or len(bodies[0].selects)
-    for body in bodies:
-        if len(body.selects) != width:
+    declared_all = bool(columns) and all(_declared_type(c) is not None for c in columns)
+    projections = [_projections(catalog, b, default_namespace, declared_all) for b in bodies]
+    width = len(columns) or len(projections[0])
+    for body, projected in zip(bodies, projections, strict=True):
+        if len(projected) != width:
             raise DispatchError(
-                f"view {_label(body)} returns {len(body.selects)} columns, expected {width}"
+                f"view {_label(body)} returns {len(projected)} columns, expected {width}"
             )
-    declared = [_declared_type(c) for c in columns] or [None] * width
-    # Declared types win, so bodies only need inferring when a column has none.
-    inferred: list[dict[int, IcebergType]] = (
-        [_inferred_types(catalog, b, default_namespace) for b in bodies]
-        if None in declared
-        else [{} for _ in bodies]
-    )
     fields: list[NestedField] = []
     for i in range(width):
-        name = columns[i].name if columns else bodies[0].selects[i].alias_or_name
+        name = columns[i].name if columns else projections[0][i][0]
+        if not columns and _AUTO_NAME.fullmatch(name):
+            raise DispatchError(
+                f"view column {i + 1} is an expression with no name; give it an alias "
+                "(AS <name>) or name it in the view's column list"
+            )
         found = {
-            _label(b): types[i] for b, types in zip(bodies, inferred, strict=True) if i in types
+            _label(b): p[i][1]
+            for b, p in zip(bodies, projections, strict=True)
+            if p[i][1] is not None
         }
         if len({str(t) for t in found.values()}) > 1:
             detail = ", ".join(f"{k}: {v}" for k, v in found.items())
             raise DispatchError(f"view bodies disagree on the type of column {name!r} ({detail})")
-        field_type = declared[i] or next(iter(found.values()), None)
+        column = columns[i] if columns else None
+        field_type = (_declared_type(column) if column is not None else None) or next(
+            iter(found.values()), None
+        )
         if field_type is None:
             raise DispatchError(
                 f"can't infer the type of view column {name!r} (it isn't read from an Iceberg "
-                "table or view in the catalog); CAST it in the query or give it a type in "
-                "the view's column list"
+                "table or view in the catalog, or it's computed decimal arithmetic, which "
+                "Spark widens); CAST it in the query or give it a type in the view's column list"
             )
-        column = columns[i] if columns else None
         doc = _column_comment(column) if isinstance(column, exp.ColumnDef) else None
         fields.append(
             NestedField(field_id=i + 1, name=name, field_type=field_type, required=False, doc=doc)
         )
     return Schema(*fields)
+
+
+# qualify() names an unaliased expression _col_<position>.
+_AUTO_NAME = re.compile(r"_col_\d+")
 
 
 def _label(body: exp.Query) -> str:
@@ -320,9 +329,10 @@ def _declared_type(column: exp.Expression) -> IcebergType | None:
     return _iceberg_type_from_sqlglot(kind) if kind is not None else None
 
 
-def _inferred_types(
-    catalog: Catalog, query: exp.Query, default_namespace: Identifier
-) -> dict[int, IcebergType]:
+def _projections(
+    catalog: Catalog, query: exp.Query, default_namespace: Identifier, declared_all: bool
+) -> list[tuple[str, IcebergType | None]]:
+    """(name, inferred type) of each output column, with ``*`` expanded."""
     dialect = query.meta.get(SOURCE_DIALECT) or SaltationSpark
     mapping = _source_schemas(catalog, query, default_namespace)
     try:
@@ -334,13 +344,29 @@ def _inferred_types(
             validate_qualify_columns=False,
         )
     except Exception as err:
+        if declared_all:
+            # Every type is given, so the body only has to line up by position.
+            return [(s.alias_or_name, None) for s in query.selects]
         raise DispatchError(f"can't resolve the view's columns: {err}") from err
     typed = annotate_types(typed, schema=mapping, dialect=dialect)
-    out: dict[int, IcebergType] = {}
-    for i, projection in enumerate(typed.selects):
-        dtype = projection.type
-        if dtype is not None and not dtype.is_type(exp.DataType.Type.UNKNOWN):
-            out[i] = _iceberg_type_from_sqlglot(dtype)
+    out: list[tuple[str, IcebergType | None]] = []
+    for select in typed.selects:
+        inner = select.unalias()
+        if isinstance(inner, exp.Star) or (
+            isinstance(inner, exp.Column) and isinstance(inner.this, exp.Star)
+        ):
+            raise DispatchError(
+                f"can't expand * in the view's {_label(query)}: its source isn't an Iceberg "
+                "table or view in the catalog; list the columns instead"
+            )
+        dtype = select.type
+        known = dtype is not None and not dtype.is_type(exp.DataType.Type.UNKNOWN)
+        field_type = _iceberg_type_from_sqlglot(dtype) if known else None
+        # sqlglot keeps the operand's precision where Spark widens it (SUM of
+        # decimal(10,2) is decimal(20,2)), and Spark can't narrow on read.
+        if isinstance(field_type, DecimalType) and not isinstance(inner, exp.Column | exp.Cast):
+            field_type = None
+        out.append((select.alias_or_name, field_type))
     return out
 
 

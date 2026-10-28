@@ -92,3 +92,16 @@ def test_unknown_dialect_is_refused() -> None:
 def test_dialect_without_heredoc_body_is_refused() -> None:
     with pytest.raises(DispatchError, match=r"DIALECT <name> AS \$\$"):
         parse_script("CREATE VIEW a.v DIALECT trino AS SELECT 1")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE VIEW a.v AS SELECT id, dialect FROM a.langs",
+        "CREATE VIEW a.v AS SELECT x AS dialect FROM a.t",
+        "ALTER VIEW a.v AS SELECT dialect FROM a.t",
+    ],
+)
+def test_a_column_named_dialect_is_not_a_clause(sql: str) -> None:
+    (stmt,) = parse_script(sql)
+    assert VIEW_BODIES not in stmt.meta

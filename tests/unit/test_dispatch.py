@@ -433,33 +433,6 @@ def test_add_partition_field_idempotent_duplicate() -> None:
     assert "already present" in result.notes
 
 
-def test_drop_partition_field() -> None:
-    catalog = _make_catalog()
-    table = _make_table()
-    catalog.load_table.return_value = table
-    dispatch(catalog, _single("ALTER TABLE foo.t DROP PARTITION FIELD x"))
-    us = table.update_spec.return_value.__enter__.return_value
-    us.remove_field.assert_called_once_with("x")
-
-
-def test_replace_partition_field() -> None:
-    catalog = _make_catalog()
-    table = _make_table()
-    catalog.load_table.return_value = table
-    dispatch(
-        catalog,
-        _single("ALTER TABLE foo.t REPLACE PARTITION FIELD x WITH bucket(8, y)"),
-    )
-    us = table.update_spec.return_value.__enter__.return_value
-    # Drop the old, add the new.
-    us.remove_field.assert_called_with("x")
-    us.add_field.assert_called()
-    args = us.add_field.call_args.args
-    assert args[0] == "y"
-    assert isinstance(args[1], BucketTransform)
-    assert args[1].num_buckets == 8
-
-
 # ---------------------------------------------------------------------------
 # WRITE ORDERED BY
 # ---------------------------------------------------------------------------
@@ -591,21 +564,6 @@ def test_add_partition_field_truncate() -> None:
     assert args[0] == "data"
     assert isinstance(args[1], TruncateTransform)
     assert args[1].width == 4
-
-
-def test_replace_partition_field_with_truncate() -> None:
-    catalog = _make_catalog()
-    table = _make_table()
-    catalog.load_table.return_value = table
-    dispatch(
-        catalog,
-        _single("ALTER TABLE foo.t REPLACE PARTITION FIELD x WITH truncate(8, data)"),
-    )
-    us = table.update_spec.return_value.__enter__.return_value
-    args = us.add_field.call_args.args
-    assert args[0] == "data"
-    assert isinstance(args[1], TruncateTransform)
-    assert args[1].width == 8
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ from saltation.sidecar.events import (
     write_event,
 )
 from saltation.sidecar.selfmigrate import ensure_current
+from saltation.sql.dialect import SaltationSpark
 from saltation.sql.dispatch import dispatch
 from saltation.sql.include import expand
 from saltation.sql.script import parse_script
@@ -485,17 +486,9 @@ def _summarise(stmts: list[StatementResult], status: str) -> str:
 
 
 def _safe_sql(stmt: exp.Expression) -> str:
-    """Best-effort ``.sql()`` for an expression.
-
-    sqlglot's generator raises ``ValueError`` for AST nodes it can't render —
-    we extend the Spark dialect with Iceberg-only expressions (``ADD
-    PARTITION FIELD``, ``WRITE ORDERED BY``, etc.) without supplying matching
-    generators because the runner never has to round-trip them. The JSON
-    output, on the other hand, does need *something* to show the user.
-    Fall back to the type name so the audit trail keeps something useful.
-    """
+    """The statement as SQL for events and ``--json``; never fails the apply over it."""
     try:
-        return stmt.sql()
+        return stmt.sql(dialect=SaltationSpark)
     except Exception:
         return f"<unprintable {type(stmt).__name__}>"
 

@@ -397,6 +397,15 @@ EFFECTS: dict[str, Effect] = {
         {"spec": {"-": ["id:bucket[16]:shard"], "+": []}},
         setup=("ALTER TABLE foo.t ADD PARTITION FIELD bucket(16, id) AS shard",),
     ),
+    "dpf_column_of_aliased_identity": t(
+        {"spec": {"-": ["category:identity:cat"], "+": []}},
+        setup=("ALTER TABLE foo.t ADD PARTITION FIELD category AS cat",),
+    ),
+    "rpf_by_transform": t(
+        {"spec": {"-": ["id:bucket[16]:id_bucket_16"], "+": ["id:bucket[8]:id_bucket_8 first"]}},
+        setup=("ALTER TABLE foo.t ADD PARTITION FIELD bucket(16, id)",),
+    ),
+    "rpf_missing": t({}),
     "rpf_basic": t(
         {"spec": {"-": ["ts:hour:ts_day"], "+": ["ts:day:ts_day first"]}},
         setup=("ALTER TABLE foo.t ADD PARTITION FIELD hour(ts) AS ts_day",),
@@ -532,6 +541,19 @@ EFFECTS: dict[str, Effect] = {
         )
     ),
     "view_untyped_external": v({}),
+    "view_select_star": v(
+        view_created(["id:int", "name:string"], "SELECT * FROM foo.t"), base="pair"
+    ),
+    "view_qualified_star": v(
+        view_created(
+            ["id:int", "name:string", "again:int"], "SELECT t.*, id AS again FROM foo.t AS t"
+        ),
+        base="pair",
+    ),
+    "view_unnamed_expression": v({}, base="pair"),
+    "view_decimal_arithmetic": v(
+        {}, base="ns", setup=("CREATE TABLE foo.d (amt DECIMAL(10, 2)) USING iceberg",)
+    ),
     "view_on_view": Effect(
         {"view:foo.v2": view_created(["name:string"], "SELECT name FROM foo.v")},
         setup=("CREATE VIEW foo.v AS SELECT id, name FROM foo.t",),

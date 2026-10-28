@@ -89,6 +89,7 @@ from saltation.sql.ast import (
     WriteDistribution,
     WriteOrderedBy,
 )
+from saltation.sql.dialect import SaltationSpark
 
 # Iceberg table property that controls write fan-out; the WRITE distribution
 # family sets it. https://iceberg.apache.org/docs/latest/spark-ddl/ (Writing
@@ -640,7 +641,7 @@ def _dispatch_alter_action(
     if isinstance(action, DropPartitionField):
         return _drop_partition_field(table, action)
     if isinstance(action, ReplacePartitionField):
-        return _replace_partition_field(catalog, table, identifier, action)
+        return _replace_partition_field(table, action)
     if isinstance(action, WriteOrderedBy):
         return _write_ordered_by(table, action)
     if isinstance(action, WriteDistribution):
@@ -1077,7 +1078,9 @@ def _scalar(node: exp.Expression | None) -> str | None:
 
 
 def _add_partition_field(table: Table, action: AddPartitionField) -> str:
-    source_column, transform, name = _resolve_partition_field(action)
+    source_column, transform, name = _partition_target(
+        action.args.get("transform") or action.args.get("this"), action.args.get("alias")
+    )
     try:
         with table.update_spec() as us:
             us.add_field(source_column, transform, name)
@@ -1094,112 +1097,94 @@ def _add_partition_field(table: Table, action: AddPartitionField) -> str:
 
 
 def _drop_partition_field(table: Table, action: DropPartitionField) -> str:
-    name = _resolve_drop_partition_name(table, action)
+    ref = action.args.get("transform") or action.args.get("this")
+    name = _resolve_partition_ref(table, ref)
     if name is None:
-        # No field in the current spec matches the (source, transform) pair —
-        # already dropped (or never added). Idempotent no-op.
-        ref = action.args.get("transform") or action.args.get("this")
-        label = ref.sql() if ref is not None else "?"
-        return f"drop partition field {label}: already absent (idempotent)"
-    try:
-        with table.update_spec() as us:
-            us.remove_field(name)
-    except ValueError as err:
-        if "not found" in str(err).lower() or "no such" in str(err).lower():
-            return f"drop partition field {name}: already absent (idempotent)"
-        raise
+        return f"drop partition field {_label_of(ref)}: already absent (idempotent)"
+    with table.update_spec() as us:
+        us.remove_field(name)
     return f"drop partition field {name}"
 
 
-def _replace_partition_field(
-    catalog: Catalog,
-    table: Table,
-    identifier: tuple[str, ...],
-    action: ReplacePartitionField,
-) -> str:
-    # PyIceberg doesn't ship an atomic "replace field" call — sequence drop
-    # then add. Both halves are idempotent under the contract above.
-    old_name = _partition_field_name_from(action.args.get("this"))
-    try:
-        with table.update_spec() as us:
-            us.remove_field(old_name)
-    except ValueError as err:
-        if not ("not found" in str(err).lower() or "no such" in str(err).lower()):
-            raise
-    table = catalog.load_table(identifier)
-    transform_node = action.args.get("transform")
-    new_alias = action.args.get("alias")
-    if isinstance(transform_node, exp.Func):
-        source = _column_name(transform_node)
-        transform = _transform_from_func(transform_node)
-    else:
-        source = _column_name(transform_node)
-        transform = IdentityTransform()
-    new_name = new_alias.name if new_alias is not None else None
-    try:
-        with table.update_spec() as us:
-            us.add_field(source, transform, new_name)
-    except ValueError as err:
-        if "duplicate" in str(err).lower() or "already" in str(err).lower():
-            return (
-                f"replace partition field {old_name} -> {source} ({transform}): "
-                "target already present (idempotent)"
-            )
-        raise
-    return f"replace partition field {old_name} -> {source} ({transform})"
-
-
-def _resolve_partition_field(action: AddPartitionField) -> tuple[str, Transform, str | None]:
-    """Decode ``AddPartitionField`` into ``(source_column, transform, name)``."""
-    transform_node = action.args.get("transform")
-    alias = action.args.get("alias")
-    if isinstance(transform_node, exp.Func):
-        source = _column_name(transform_node)
-        transform = _transform_from_func(transform_node)
-    else:
-        # Bare-column ADD PARTITION FIELD x → identity transform.
-        this = action.args.get("this")
-        source = _column_name(this)
-        transform = IdentityTransform()
-    name = alias.name if alias is not None else None
-    return source, transform, name
-
-
-def _resolve_drop_partition_name(table: Table, action: DropPartitionField) -> str | None:
-    """Resolve the partition-field name a ``DROP PARTITION FIELD`` removes.
-
-    ``DROP PARTITION FIELD <name>`` references the field directly. ``DROP
-    PARTITION FIELD <transform>(<col>)`` references it by (source column,
-    transform): Iceberg synthesises the field name (e.g. ``id_bucket``), so the
-    bare source column is the wrong handle for ``remove_field``. Match against
-    the current spec by source-id + transform instead, returning ``None`` when
-    nothing matches (the idempotent already-dropped case).
-    """
-    transform_node = action.args.get("transform")
-    if transform_node is None:
-        return _partition_field_name_from(action.args.get("this"))
-    source = _column_name(transform_node)
-    transform = (
-        _transform_from_func(transform_node)
-        if isinstance(transform_node, exp.Func)
-        else IdentityTransform()
+def _replace_partition_field(table: Table, action: ReplacePartitionField) -> str:
+    old_ref = action.args.get("this")
+    old = _resolve_partition_ref(table, old_ref)
+    source, transform, name = _partition_target(
+        action.args.get("transform"), action.args.get("alias")
     )
+    new = _spec_field(table, source, transform)
+    label = f"replace partition field {_label_of(old_ref)} -> {source} ({transform})"
+    if old is None or (new is not None and new.name == old):
+        if new is not None and (name is None or new.name == name):
+            return f"{label}: already replaced (idempotent)"
+        raise DispatchError(
+            f"can't replace partition field {_label_of(old_ref)}: it isn't in the table's "
+            "current partition spec"
+        )
+    # One spec update, as Spark does: the old field never outlives the new one.
+    try:
+        with table.update_spec() as us:
+            us.remove_field(old)
+            us.add_field(source, transform, name)
+    except ValueError as err:
+        # PyIceberg, unlike Iceberg Java, won't let the new field take the
+        # removed one's name in the same update; that case needs two commits.
+        if "duplicate partition field name" not in str(err).lower():
+            raise
+        with table.update_spec() as us:
+            us.remove_field(old)
+        with table.refresh().update_spec() as us:
+            us.add_field(source, transform, name)
+    return label
+
+
+def _partition_target(
+    node: exp.Expression | None, alias: exp.Expression | None
+) -> tuple[str, Transform, str | None]:
+    """``(source column, transform, name)`` of ``<transform>(<col>)`` or a bare column."""
+    if isinstance(node, exp.Func):
+        source, transform = _column_name(node), _transform_from_func(node)
+    else:
+        source, transform = _column_name(node), IdentityTransform()
+    return source, transform, alias.name if alias is not None else None
+
+
+def _resolve_partition_ref(table: Table, ref: exp.Expression | None) -> str | None:
+    """The current spec's field a DROP/REPLACE reference names, or None.
+
+    As in Iceberg's Spark extensions: a transform call matches by source
+    column + transform, a bare name that is a column means identity(column),
+    and any other bare name is a partition field name.
+    """
+    if ref is None:
+        raise DispatchError("partition field reference is empty")
+    if isinstance(ref, exp.Func):
+        field = _spec_field(table, _column_name(ref), _transform_from_func(ref))
+        return field.name if field is not None else None
+    name = _column_name(ref)
+    if _has_field(table, name):
+        field = _spec_field(table, name, IdentityTransform())
+        return field.name if field is not None else None
+    return name if any(pf.name == name for pf in table.spec().fields) else None
+
+
+def _spec_field(table: Table, source: str, transform: Transform) -> PartitionField | None:
     try:
         source_id = table.schema().find_field(source).field_id
     except ValueError:
         return None
-    for pf in table.spec().fields:
-        if pf.source_id == source_id and str(pf.transform) == str(transform):
-            return pf.name
-    return None
+    return next(
+        (
+            pf
+            for pf in table.spec().fields
+            if pf.source_id == source_id and str(pf.transform) == str(transform)
+        ),
+        None,
+    )
 
 
-def _partition_field_name_from(node: exp.Expression | None) -> str:
-    if node is None:
-        raise DispatchError("partition field reference is empty")
-    if isinstance(node, exp.Func):
-        return _column_name(node)
-    return _column_name(node)
+def _label_of(ref: exp.Expression | None) -> str:
+    return ref.sql(dialect=SaltationSpark) if ref is not None else "?"
 
 
 def _column_name(node: exp.Expression | None) -> str:

@@ -118,16 +118,28 @@ def _dialect_clauses(tokens: list[Token]) -> list[tuple[Token, str, Token]]:
     """Every top-level ``DIALECT <name> AS $$...$$`` as (DIALECT token, name, body token)."""
     out: list[tuple[Token, str, Token]] = []
     depth = 0
-    for i, token in enumerate(tokens):
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
         if token.token_type == TokenType.L_PAREN:
             depth += 1
         elif token.token_type == TokenType.R_PAREN:
             depth -= 1
-        elif depth == 0 and token.text.upper() == "DIALECT" and i + 3 < len(tokens):
-            name, as_, body = tokens[i + 1], tokens[i + 2], tokens[i + 3]
-            if as_.token_type != TokenType.ALIAS or body.token_type != TokenType.HEREDOC_STRING:
-                raise DispatchError(f"expected DIALECT <name> AS $$ ... $$ near {name.text!r}")
-            out.append((token, name.text.lower(), body))
+        elif depth == 0 and token.token_type == TokenType.ALIAS:
+            # A plain ``AS`` starts the query; ``dialect`` past it is a column.
+            break
+        elif depth == 0 and token.text.upper() == "DIALECT":
+            clause = tokens[i : i + 4]
+            if (
+                len(clause) < 4
+                or clause[2].token_type != TokenType.ALIAS
+                or clause[3].token_type != TokenType.HEREDOC_STRING
+            ):
+                raise DispatchError(f"expected DIALECT <name> AS $$ ... $$ near {token.text!r}")
+            out.append((token, clause[1].text.lower(), clause[3]))
+            i += 4
+            continue
+        i += 1
     return out
 
 

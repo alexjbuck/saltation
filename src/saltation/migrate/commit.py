@@ -412,7 +412,6 @@ def saltation_uncommit(
         )
 
     committed_text = latest_file.path.read_text(encoding="utf-8")
-    current_path.write_text(committed_text, encoding="utf-8")
 
     from saltation.migrate.runner import _restore_baseline
 
@@ -422,6 +421,8 @@ def saltation_uncommit(
     skipped = sorted({r.table_ident for r in rows} - set(rolled_back))
     rollback_states = rows
 
+    # Only once the tables are restored: a refused restore leaves both files as they were.
+    current_path.write_text(committed_text, encoding="utf-8")
     latest_file.path.unlink()
 
     from saltation.migrate.runner import _default_actor as _make_actor
