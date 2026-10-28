@@ -19,7 +19,7 @@ The public ``Transaction`` context-manager wraps the commit; only the *staging* 
 four-update payload requires ``_apply``. We isolate that call here so the rest of the
 codebase has zero direct dependency on PyIceberg internals.
 
-TODO(upstream): file a PyIceberg issue for a public ``Transaction.apply()`` (or accept
+TODO(upstream, #26): a public PyIceberg ``Transaction.apply()`` (or accept
 batch updates on the existing builder surface) so cambrian can drop the underscore.
 
 INVARIANT: ``_commit`` holds the ONLY call to ``Transaction._apply`` in cambrian.
@@ -129,6 +129,7 @@ def replace_schema(table: Table, schema: Schema) -> None:
 
 
 def set_location(table: Table, location: str) -> None:
+    # Transaction.update_location is NotImplemented in PyIceberg (#24).
     _commit(table, (SetLocationUpdate(location=location),), ())
 
 
@@ -138,7 +139,7 @@ def upgrade_format_version(table: Table, format_version: int) -> None:
         return
     update = UpgradeFormatVersionUpdate(format_version=format_version)  # ty: ignore[unknown-argument, missing-argument]
     # Sent straight to the catalog: a Transaction first replays the update on
-    # its local metadata copy, and PyIceberg 0.12 rejects v3 there.
+    # its local metadata copy, and PyIceberg 0.12 rejects v3 there (#23).
     table.catalog.commit_table(table, (), (update,))
 
 

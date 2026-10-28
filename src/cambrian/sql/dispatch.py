@@ -241,7 +241,7 @@ def _dispatch_alter_namespace(catalog: Catalog, stmt: AlterNamespaceProperties) 
     except pydantic.ValidationError:
         # PyIceberg requires ``missing`` in the response, but the REST spec
         # makes it optional and Lakekeeper omits it, so a successful update
-        # fails to deserialize. Trust the catalog's state instead.
+        # fails to deserialize. Trust the catalog's state instead (#20).
         current = catalog.load_namespace_properties(namespace)
         if any(current.get(k) != v for k, v in updates.items()):
             raise
@@ -369,7 +369,7 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
             properties=options.properties,
         )
         # PyIceberg's create path re-assigns field ids and drops defaults on
-        # the way, so write-defaults follow in a second commit.
+        # the way, so write-defaults follow in a second commit (#22).
         if defaults := {
             f.name: f.write_default for f in schema.fields if f.write_default is not None
         }:
@@ -829,7 +829,7 @@ _DATE_PROMOTION_SAFE = (YearTransform, MonthTransform, DayTransform, VoidTransfo
 
 
 def _promote_date(table: Table, name: str, target: IcebergType) -> None:
-    """Iceberg v3 date -> timestamp/timestamp_ns, which PyIceberg's UpdateSchema refuses."""
+    """Iceberg v3 date -> timestamp/timestamp_ns, which PyIceberg's UpdateSchema refuses (#25)."""
     _require_v3(table.format_version, f"promoting date column {name} to {target}")
     schema = table.schema()
     field_id = schema.find_field(name).field_id

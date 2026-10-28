@@ -2,7 +2,7 @@
 
 PyIceberg can create, load, list and drop views; replacing a view (adding a
 version), changing its properties and renaming it are plain REST calls with
-no client method. They go through the catalog's own HTTP session so auth,
+no client method (#27). They go through the catalog's own HTTP session so auth,
 headers and TLS settings are shared, and are isolated here like the raw
 table updates in ``txn.py``. Request bodies follow the REST OpenAPI spec
 (``CommitViewRequest``, ``RenameTableRequest``).

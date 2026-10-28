@@ -59,7 +59,7 @@ RIGS = {
         health_url="http://localhost:8181/iceberg/v1/config",
         location_root="s3://cambrian-warehouse/warehouse",
         # PyIceberg 0.12 sends "Authorization: Bearer None" without an auth
-        # config; Gravitino rejects it where Lakekeeper ignores it.
+        # config; Gravitino rejects it where Lakekeeper ignores it (#19).
         properties={"uri": "http://localhost:8181/iceberg", "auth": {"type": "noop"}, **_S3},
         table_defaults={"write.parquet.compression-codec": "zstd"},
     ),

@@ -116,10 +116,10 @@ def ns_created(props: dict[str, str] | None = None) -> dict[str, Any]:
 
 V3 = "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')"
 # Lakekeeper rejects even a bare "geometry" schema type (HTTP 422). PyIceberg
-# 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none.
+# 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none (#29, #21).
 _NO_GEO = "Lakekeeper (v0.14.2) can't deserialize geometry/geography schema types"
 # PyIceberg quotes the CRS/algorithm ("geography('OGC:CRS84', 'vincenty')"),
-# which Iceberg Java's type parser rejects.
+# which Iceberg Java's type parser rejects (#21).
 _QUOTED_GEO = "Iceberg Java can't parse PyIceberg's quoted geography params"
 
 
