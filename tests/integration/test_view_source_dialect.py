@@ -130,3 +130,18 @@ def test_dialect_bodies_must_agree_on_inferred_types(rest_catalog: RestCatalog, 
     with pytest.raises(DispatchError, match="disagree on the type of column 'id'"):
         apply_script(rest_catalog, script, DIALECTS)
     assert not rest_catalog.view_exists((ns, "v"))
+
+
+def test_trino_body_with_a_backslash_string_is_stored_verbatim(
+    rest_catalog: RestCatalog, ns: str
+) -> None:
+    apply_script(rest_catalog, f"CREATE TABLE {ns}.t (path STRING) USING iceberg;")
+    body = f"SELECT replace(path, '\\', '/') AS path FROM {ns}.t"
+    apply_script(
+        rest_catalog,
+        f"CREATE VIEW {ns}.v AS {body};\nALTER TABLE {ns}.t ADD COLUMN c INT;",
+        DIALECTS,
+        view_source_dialect="trino",
+    )
+    assert _reps(rest_catalog, (ns, "v"))["trino"] == body
+    assert [f.name for f in rest_catalog.load_table((ns, "t")).schema().fields] == ["path", "c"]

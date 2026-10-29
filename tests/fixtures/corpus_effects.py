@@ -16,9 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pyiceberg.exceptions import BadRequestError, RESTError
+
 from tests.fixtures.catalog_state import ANY
 
-__all__ = ["BASES", "EFFECTS", "VIEW_DIALECTS", "Effect"]
+__all__ = ["BASES", "EFFECTS", "VIEW_DIALECTS", "Effect", "Refusal"]
 
 Base = Literal["ns", "wide", "pair", "rows"]
 
@@ -73,16 +75,24 @@ BASES: dict[str, list[str]] = {
 
 
 @dataclass(frozen=True)
+class Refusal:
+    reason: str
+    # The catalog's error as PyIceberg raises it, and a pattern for its message.
+    error: type[Exception]
+    match: str
+
+
+@dataclass(frozen=True)
 class Effect:
     effects: dict[str, dict[str, Any]]
     base: Base | None = "wide"
     setup: tuple[str, ...] = ()
     # Data ops append on every run; everything else must be a no-op the second time.
     reapply: bool = True
-    # Test catalogs (by rig name) that refuse this, with why; saltation's request
-    # is still correct. Run as strict xfails, so a catalog that starts
-    # accepting it is noticed.
-    catalog_refuses: dict[str, str] = field(default_factory=dict)
+    # Test catalogs (by rig name) that refuse this; saltation's request is
+    # still correct. The test asserts that exact refusal, so a saltation error
+    # can't pass for it and a catalog that starts accepting it is noticed.
+    catalog_refuses: dict[str, Refusal] = field(default_factory=dict)
 
 
 def created(
@@ -117,10 +127,23 @@ def ns_created(props: dict[str, str] | None = None) -> dict[str, Any]:
 V3 = "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')"
 # Lakekeeper rejects even a bare "geometry" schema type (HTTP 422). PyIceberg
 # 0.12 also quotes the CRS (geometry('EPSG:4326')) where the spec has none (#29, #21).
-_NO_GEO = "Lakekeeper (v0.14.2) can't deserialize geometry/geography schema types"
+_NO_GEO = Refusal(
+    "Lakekeeper (v0.14.2) can't deserialize geometry/geography schema types",
+    RESTError,
+    r"RESTError 422: .*untagged enum SchemaEnum",
+)
 # PyIceberg quotes the CRS/algorithm ("geography('OGC:CRS84', 'vincenty')"),
 # which Iceberg Java's type parser rejects (#21).
 _QUOTED_GEO = "Iceberg Java can't parse PyIceberg's quoted geography params"
+_QUOTED_GEO_REFUSALS = {
+    "gravitino": Refusal(
+        _QUOTED_GEO,
+        BadRequestError,
+        r"Cannot parse type string to primitive: geography\('OGC:CRS84', 'vincenty'\)",
+    ),
+    # Polaris answers with a bare 400; BadRequestError is still the catalog's.
+    "polaris": Refusal(_QUOTED_GEO, BadRequestError, r"HTTP 400 Bad Request"),
+}
 
 
 # Views store one SQL text per dialect; the effect tests store two so the
@@ -453,7 +476,13 @@ EFFECTS: dict[str, Effect] = {
     "set_comment_property": t({"props": {"comment": [None, "A table comment."]}}),
     "set_location": t(
         {"loc": [ANY, "s3://bucket/moved"]},
-        catalog_refuses={"lakekeeper": "Lakekeeper manages table locations: SetLocationNotAllowed"},
+        catalog_refuses={
+            "lakekeeper": Refusal(
+                "Lakekeeper manages table locations",
+                BadRequestError,
+                r"SetLocationNotAllowed: Cannot change table location",
+            )
+        },
     ),
     # --- identifier fields ------------------------------------------------
     "set_identifier_fields_single": t({"ident": {"-": [], "+": ["id first"]}}),
@@ -464,7 +493,7 @@ EFFECTS: dict[str, Effect] = {
     # --- format v3 ------------------------------------------------------------
     "ct_time": t(created(["t:time"]), base="ns"),
     "ct_v3_geo_types": t(
-        catalog_refuses={"lakekeeper": _NO_GEO, "gravitino": _QUOTED_GEO, "polaris": _QUOTED_GEO},
+        catalog_refuses={"lakekeeper": _NO_GEO, **_QUOTED_GEO_REFUSALS},
         effect=created(
             [
                 "g:geometry",

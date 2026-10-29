@@ -105,3 +105,31 @@ def test_dialect_without_heredoc_body_is_refused() -> None:
 def test_a_column_named_dialect_is_not_a_clause(sql: str) -> None:
     (stmt,) = parse_script(sql)
     assert VIEW_BODIES not in stmt.meta
+
+
+def test_trino_body_ending_a_string_in_a_backslash() -> None:
+    body = "SELECT replace(p, '\\', '/') AS q FROM a.t"
+    script = (
+        f"CREATE VIEW a.v (q STRING) AS {body};\nALTER TABLE a.t ADD COLUMN c INT;\nDROP VIEW a.w;"
+    )
+    view, alter, drop = parse_script(script, view_source_dialect="trino")
+    assert view.expression.meta[SOURCE_SQL] == body
+    assert isinstance(alter, exp.Alter) and isinstance(drop, exp.Drop)
+
+
+def test_semicolon_inside_a_trino_quoted_identifier_does_not_split() -> None:
+    body = 'SELECT "a;b" FROM a.t'
+    (view,) = parse_script(f"CREATE VIEW a.v (x STRING) AS {body}", view_source_dialect="trino")
+    assert view.expression.meta[SOURCE_SQL] == body
+
+
+def test_spark_statements_keep_spark_string_rules() -> None:
+    # \' is an escaped quote in Spark, so the ; stays inside the string.
+    script = "ALTER TABLE a.t SET TBLPROPERTIES ('k' = 'it\\'s; fine'); DROP VIEW a.v"
+    alter, drop = parse_script(script, view_source_dialect="trino")
+    assert isinstance(alter, exp.Alter) and isinstance(drop, exp.Drop)
+
+
+def test_an_unreadable_script_is_a_dispatch_error() -> None:
+    with pytest.raises(DispatchError, match="can't read the script"):
+        parse_script("ALTER TABLE a.t SET TBLPROPERTIES ('k' = 'open")

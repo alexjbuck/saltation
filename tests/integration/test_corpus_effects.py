@@ -33,16 +33,7 @@ from .conftest import _drop_namespace_recursively
 from .rig import RIG
 
 ENTRIES = [e for e in CORPUS if e.expected in {"apply", "invalid"}]
-PARAMS = [
-    pytest.param(
-        e,
-        id=e.id,
-        marks=[pytest.mark.xfail(strict=True, reason=reason)]
-        if (reason := EFFECTS[e.id].catalog_refuses.get(RIG.name) if e.id in EFFECTS else None)
-        else [],
-    )
-    for e in ENTRIES
-]
+PARAMS = [pytest.param(e, id=e.id) for e in ENTRIES]
 
 
 def test_every_positive_and_invalid_entry_has_an_effect() -> None:
@@ -98,6 +89,13 @@ def test_corpus_entry_effect(rest_catalog: RestCatalog, ns: str, entry: CorpusEn
     targets = list(_subst(list(effect.effects), ns))
     sql = _subst(entry.sql, ns)
     before = _snapshots(rest_catalog, targets)
+
+    refusal = effect.catalog_refuses.get(RIG.name)
+    if refusal is not None:
+        with pytest.raises(refusal.error, match=refusal.match):
+            apply_script(rest_catalog, sql, VIEW_DIALECTS)
+        assert _snapshots(rest_catalog, targets) == before
+        return
 
     if entry.expected == "invalid":
         with pytest.raises(SaltationError) as info:

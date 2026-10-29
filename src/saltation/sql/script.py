@@ -21,6 +21,7 @@ from __future__ import annotations
 import sqlglot
 from sqlglot import expressions as exp
 from sqlglot.dialects.dialect import Dialect
+from sqlglot.errors import TokenError
 from sqlglot.tokens import Token, TokenType
 
 from saltation.errors import DispatchError
@@ -35,7 +36,7 @@ VIEW_BODIES = "saltation_view_bodies"
 
 def parse_script(text: str, *, view_source_dialect: str = "spark") -> list[exp.Expression]:
     statements: list[exp.Expression] = []
-    for chunk, tokens in _split(text):
+    for chunk, tokens in _split(text, view_source_dialect):
         view = _parse_view(chunk, tokens, view_source_dialect)
         if view is not None:
             statements.append(view)
@@ -44,18 +45,76 @@ def parse_script(text: str, *, view_source_dialect: str = "spark") -> list[exp.E
     return statements
 
 
-def _split(text: str) -> list[tuple[str, list[Token]]]:
+def _split(text: str, source_dialect: str) -> list[tuple[str, list[Token]]]:
+    """Statements as (text, Spark tokens rebased to it).
+
+    A view body in *source_dialect* is never lexed as Spark: its quoting rules
+    differ (Trino's ``'\\'`` is a one-character string; to Spark it's an open
+    escape). Spark tokens stop at the body's ``AS`` and the body runs to the
+    ``;`` its own dialect's tokenizer finds.
+    """
     chunks: list[tuple[str, list[Token]]] = []
-    start = 0
-    current: list[Token] = []
-    for token in SaltationSpark().tokenize(text):
-        if token.token_type == TokenType.SEMICOLON:
-            chunks.append((text[start : token.start], current))
-            start, current = token.end + 1, []
-        else:
+    pos = 0
+    while pos < len(text):
+        tokens, error = _tokenize(SaltationSpark, text[pos:])
+        start, depth, current = 0, 0, []
+        resume = None
+        for token in tokens:
+            if token.token_type == TokenType.SEMICOLON:
+                if current:
+                    chunks.append((text[pos + start : pos + token.start], current))
+                start, current = token.end + 1, []
+                continue
             current.append(_rebase(token, start))
-    chunks.append((text[start:], current))
-    return [(c, toks) for c, toks in chunks if toks]
+            if token.token_type == TokenType.L_PAREN:
+                depth += 1
+            elif token.token_type == TokenType.R_PAREN:
+                depth -= 1
+            elif depth == 0 and _opens_source_body(current, source_dialect):
+                body_start = pos + token.end + 1
+                end = _body_end(text, body_start, source_dialect)
+                chunks.append((text[pos + start : end], current))
+                resume = end + 1
+                break
+        if resume is not None:
+            pos = resume
+            continue
+        if error is not None:
+            raise DispatchError(f"can't read the script as Spark SQL: {error}") from error
+        if current:
+            chunks.append((text[pos + start :], current))
+        break
+    return chunks
+
+
+def _opens_source_body(tokens: list[Token], source_dialect: str) -> bool:
+    """Whether the last token is the ``AS`` before a view body in *source_dialect*."""
+    return (
+        source_dialect != "spark"
+        and tokens[-1].token_type == TokenType.ALIAS
+        and _is_view_statement(tokens)
+        and not any(t.text.upper() == "DIALECT" for t in tokens)
+    )
+
+
+def _body_end(text: str, start: int, dialect: str) -> int:
+    tokens, error = _tokenize(dialect, text[start:])
+    for token in tokens:
+        if token.token_type == TokenType.SEMICOLON:
+            return start + token.start
+    if error is not None:
+        raise DispatchError(f"can't read the view body as {dialect} SQL: {error}") from error
+    return len(text)
+
+
+def _tokenize(dialect: str | type[Dialect], sql: str) -> tuple[list[Token], TokenError | None]:
+    """All tokens, or those before the first tokenizer error and the error."""
+    d = Dialect.get_or_raise(dialect)
+    tokenizer = d.tokenizer_class(dialect=d)
+    try:
+        return tokenizer.tokenize(sql), None
+    except TokenError as err:
+        return list(tokenizer.tokens), err
 
 
 def _rebase(token: Token, offset: int) -> Token:
