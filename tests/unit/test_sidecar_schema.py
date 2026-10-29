@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pyiceberg.schema import Schema
 
-from cambrian.sidecar.schema import (
-    CAMBRIAN_SIDECAR_VERSION,
+from saltation.sidecar.schema import (
     EVENTS_SCHEMA,
     EVENTS_TABLE,
+    SALTATION_SIDECAR_VERSION,
     SELF_MIGRATIONS,
     TABLE_STATES_SCHEMA,
     TABLE_STATES_TABLE,
@@ -74,8 +74,8 @@ def test_table_name_constants() -> None:
 
 def test_version_matches_self_migration_count() -> None:
     """The on-disk version is defined as ``len(SELF_MIGRATIONS)``."""
-    assert CAMBRIAN_SIDECAR_VERSION == len(SELF_MIGRATIONS)
-    assert CAMBRIAN_SIDECAR_VERSION >= 1
+    assert SALTATION_SIDECAR_VERSION == len(SELF_MIGRATIONS)
+    assert SALTATION_SIDECAR_VERSION >= 1
 
 
 def test_self_migrations_are_callable() -> None:

@@ -115,11 +115,11 @@ itself):
   column sort is `IdentityTransform()`.
 
 This is mutation-side, not rollback-side, so it doesn't impact M4 — but
-note it for any cambrian code that exercises sort orders in tests.
+note it for any saltation code that exercises sort orders in tests.
 
 ## Ergonomic notes for the M4 wrapper
 
-A few observations on what the `src/cambrian/iceberg/txn.py` wrapper
+A few observations on what the `src/saltation/iceberg/txn.py` wrapper
 should look like, based on building the prototype:
 
 1. **Use a tuple, not list.** Match the signature literally.
@@ -146,7 +146,7 @@ should look like, based on building the prototype:
        txn._apply(updates=…, requirements=…)
    ```
 
-   `_apply` is private, but the `with` block is public. The cambrian
+   `_apply` is private, but the `with` block is public. The saltation
    wrapper should expose a `restore_pointers(table, cp,
    current_main_snapshot_id) -> None` that takes a `Checkpoint`
    dataclass and the expected current-main snapshot id, builds the
@@ -177,7 +177,7 @@ post-commit state), as expected.
 ## Files
 
 - `prototypes/m4_rollback.py` — the prototype script. Self-contained,
-  not imported by anything in `src/cambrian/`. Kept as a reference for
+  not imported by anything in `src/saltation/`. Kept as a reference for
   future readers and as a re-runnable smoke check for the rollback
   primitive.
 - `prototypes/M4_PRECONDITION_RESULT.md` — this document.

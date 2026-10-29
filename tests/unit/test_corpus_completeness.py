@@ -27,8 +27,8 @@ from collections.abc import Callable
 import pytest
 from sqlglot import expressions as exp
 
-from cambrian.sql import dispatch as dispatch_mod
-from cambrian.sql.ast import (
+from saltation.sql import dispatch as dispatch_mod
+from saltation.sql.ast import (
     AddPartitionField,
     AlterColumnPosition,
     DropIdentifierFields,
@@ -39,7 +39,7 @@ from cambrian.sql.ast import (
     WriteDistribution,
     WriteOrderedBy,
 )
-from cambrian.sql.dispatch import _SQLGLOT_TYPE_TO_ICEBERG
+from saltation.sql.dispatch import _SQLGLOT_TYPE_TO_ICEBERG
 from tests.fixtures.iceberg_corpus import positives
 
 
@@ -83,6 +83,7 @@ _PRIMITIVE_TYPE_COVERAGE: dict[exp.DataType.Type, tuple[str, ...]] = {
     exp.DataType.Type.TIMESTAMPNTZ: ("ct_all_primitives",),
     exp.DataType.Type.TIMESTAMPTZ: ("ct_timestamptz_alias",),
     exp.DataType.Type.TIMESTAMPLTZ: ("ct_timestamptz_alias",),
+    exp.DataType.Type.TIME: ("ct_time",),
 }
 
 # DECIMAL + the composites are handled by explicit branches in
@@ -92,6 +93,8 @@ _COMPOSITE_TYPE_COVERAGE: dict[str, tuple[str, ...]] = {
     "STRUCT": ("ct_struct", "ct_nested_combo"),
     "ARRAY": ("ct_array", "ct_nested_combo"),
     "MAP": ("ct_map", "ct_nested_combo"),
+    "GEOMETRY": ("ct_v3_geo_types", "add_column_geometry_v3"),
+    "GEOGRAPHY": ("ct_v3_geo_types",),
 }
 
 
@@ -135,6 +138,7 @@ _TRANSFORM_COVERAGE: dict[str, tuple[str, ...]] = {
     "days": ("ct_part_days",),
     "hour": ("ct_part_hour", "apf_hour"),
     "hours": ("ct_part_hours",),
+    "date_hour": ("ct_part_date_hour",),
 }
 
 

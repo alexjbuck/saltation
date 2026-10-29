@@ -1,0 +1,8 @@
+"""SQL parsing, include resolution, and dispatch to PyIceberg.
+
+Implemented in M5.
+"""
+
+from saltation.sql.include import ExpandedSql, expand
+
+__all__ = ["ExpandedSql", "expand"]

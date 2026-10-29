@@ -1,6 +1,6 @@
 """M4 precondition prototype: verify atomic four-pointer rollback.
 
-Standalone exploratory script (NOT part of the cambrian package and NOT a
+Standalone exploratory script (NOT part of the saltation package and NOT a
 pytest target). Run against the live docker-compose rig under
 ``docker/compose.yml``:
 
@@ -12,7 +12,7 @@ The script exercises the design decision recorded in CLAUDE.md:
     Rollback primitive: one atomic commit restoring four pointers
     (SetSnapshotRefUpdate, SetCurrentSchemaUpdate, SetDefaultSpecUpdate,
     SetDefaultSortOrderUpdate) via Transaction._apply(). Private PyIceberg
-    API - isolated in src/cambrian/iceberg/txn.py behind one wrapper
+    API - isolated in src/saltation/iceberg/txn.py behind one wrapper
     function.
 
 We need to confirm the private API actually works against Lakekeeper before
@@ -59,13 +59,13 @@ LOG = logging.getLogger("m4_rollback")
 # Mirrors tests/integration/conftest.py CATALOG_KWARGS. Hard-coded here
 # because this script is intentionally standalone - the conftest fixture
 # uses pytest plumbing we don't want to drag in.
-CATALOG_NAME = "cambrian"
+CATALOG_NAME = "saltation"
 CATALOG_KWARGS: dict[str, Any] = {
     "uri": "http://localhost:8181/catalog",
-    "warehouse": "cambrian",
+    "warehouse": "saltation",
     "s3.endpoint": "http://localhost:9000",
-    "s3.access-key-id": "cambrian-access-key",
-    "s3.secret-access-key": "cambrian-secret-key",
+    "s3.access-key-id": "saltation-access-key",
+    "s3.secret-access-key": "saltation-secret-key",
     "s3.region": "local",
     "s3.path-style-access": "true",
 }

@@ -1,11 +1,11 @@
-# cambrian walkthrough
+# saltation walkthrough
 
-A guided, end-to-end run through cambrian against a self-contained
+A guided, end-to-end run through saltation against a self-contained
 Iceberg stack (Lakekeeper + rustfs + postgres in Docker). Skim the
 top-level [README](../README.md) for orientation first; this doc is the
 hands-on follow-up.
 
-Cambrian calls the units it manages **evolutions** — matching Iceberg's
+Saltation calls the units it manages **evolutions** — matching Iceberg's
 own "schema evolution" / "partition evolution" vocabulary. (If you've
 used Postgres tools like Flyway or graphile-migrate, this is the same
 workflow: file history in git, bootstrap new instances by re-applying
@@ -13,7 +13,7 @@ the same set.)
 
 ## What you'll learn
 
-The cambrian lifecycle has four moving parts: **idempotent apply** of
+The saltation lifecycle has four moving parts: **idempotent apply** of
 `current.sql` during dev, **watch mode** for hot-reload, **commit** to
 freeze a dev iteration into the canonical `committed/` history, and
 **sync** to rehydrate that history on a fresh checkout. By the end of
@@ -27,19 +27,19 @@ postscript.
 ## Prerequisites
 
 - Docker (Desktop on macOS/Windows; native engine on Linux).
-- `uv` (or `pipx`) to run cambrian. The examples below use `uv tool
-  install`, but any way that puts `cambrian` on your `$PATH` works.
+- `uv` (or `pipx`) to run saltation. The examples below use `uv tool
+  install`, but any way that puts `saltation` on your `$PATH` works.
 - An empty shell session and a willingness to copy-paste.
 
-Install cambrian once it's on PyPI:
+Install saltation once it's on PyPI:
 
 ```bash
-uv tool install cambrian
-cambrian --version
+uv tool install saltation
+saltation --version
 ```
 
 Developing against a local clone of this repo? Substitute `uv run
---project <path-to-cambrian> cambrian` for plain `cambrian` everywhere
+--project <path-to-saltation> saltation` for plain `saltation` everywhere
 below.
 
 All commands assume you've `cd`-ed into the `examples/` directory:
@@ -54,7 +54,7 @@ cd examples
 docker compose -f docker-compose.yml up -d
 ```
 
-The stack uses non-default host ports so it can run alongside cambrian's
+The stack uses non-default host ports so it can run alongside saltation's
 integration-test rig:
 
 | service    | host port | container port |
@@ -64,12 +64,12 @@ integration-test rig:
 | postgres   | 5433      | 5432           |
 
 The `bootstrap` container POSTs Lakekeeper's two non-idempotent
-provisioning calls (accept terms, create the `cambrian-example`
+provisioning calls (accept terms, create the `saltation-example`
 warehouse) and exits. Wait for it to settle, then verify:
 
 ```bash
 # Confirm the catalog responds to a config probe.
-curl -sS "http://localhost:9181/catalog/v1/config?warehouse=cambrian-example" \
+curl -sS "http://localhost:9181/catalog/v1/config?warehouse=saltation-example" \
   | head -c 120
 ```
 
@@ -83,37 +83,37 @@ both `lakekeeper` and `rustfs` need to be `(healthy)` and the
 
 ## Step 2: Initialize the sidecar
 
-cambrian stores its audit trail and checkpoint metadata in **sidecar
+saltation stores its audit trail and checkpoint metadata in **sidecar
 tables** that live in the same catalog as your real tables — under a
-namespace you pick (`_cambrian` by default).
+namespace you pick (`_saltation` by default).
 
 ```bash
-cambrian init --path cambrian.toml
+saltation init --path saltation.toml
 ```
 
 ```text
 # expected:
-Initialized sidecar at _cambrian (version=1)
+Initialized sidecar at _saltation (version=2)
 ```
 
-Three tables now exist under `_cambrian`:
+Three tables now exist under `_saltation`:
 
 - `events` — append-only audit log of every `apply`, `rollback`,
   `commit`, and `uncommit`.
 - `table_states` — per-affected-table snapshot pointers, used by reset
   mode and `reset-to` to reconstruct historical states.
-- `version` — schema version of the sidecar itself, so future cambrian
+- `version` — schema version of the sidecar itself, so future saltation
   binaries can self-migrate forward without your intervention.
 
-Re-running `cambrian init` is a no-op:
+Re-running `saltation init` is a no-op:
 
 ```bash
-cambrian init --path cambrian.toml
+saltation init --path saltation.toml
 ```
 
 ```text
 # expected:
-Already initialized: sidecar at _cambrian (version=1)
+Already initialized: sidecar at _saltation (version=2)
 ```
 
 ## Step 3: Your first evolution
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS demo.users (
 Apply it:
 
 ```bash
-cambrian apply --json --path cambrian.toml
+saltation apply --json --path saltation.toml
 ```
 
 ```json
@@ -152,7 +152,7 @@ cambrian apply --json --path cambrian.toml
 Now run the exact same command again:
 
 ```bash
-cambrian apply --json --path cambrian.toml
+saltation apply --json --path saltation.toml
 ```
 
 ```json
@@ -166,10 +166,10 @@ cambrian apply --json --path cambrian.toml
 }
 ```
 
-`status: "unchanged"` is the idempotent contract in action. cambrian
+`status: "unchanged"` is the idempotent contract in action. saltation
 hashes the expanded `current.sql`, compares it to the most recent
 `apply` event, and short-circuits when nothing has changed. You can
-safely re-invoke `cambrian apply` on a flaky CI job, after a partial
+safely re-invoke `saltation apply` on a flaky CI job, after a partial
 deploy, or in a tight watch loop, and you'll only ever apply the SQL
 once per distinct hash.
 
@@ -191,10 +191,10 @@ ALTER TABLE demo.users ADD COLUMN IF NOT EXISTS name STRING;
 Apply again:
 
 ```bash
-cambrian apply --json --path cambrian.toml
+saltation apply --json --path saltation.toml
 ```
 
-The hash changes, so cambrian runs the file. The CREATE statements log
+The hash changes, so saltation runs the file. The CREATE statements log
 `already exists` notes; the ALTER actually does the work:
 
 ```json
@@ -210,11 +210,11 @@ The hash changes, so cambrian runs the file. The CREATE statements log
 ```
 
 That's the contract: every statement in `current.sql` is written so it
-no-ops on a catalog that already has the change. cambrian doesn't have
+no-ops on a catalog that already has the change. saltation doesn't have
 a "rollback this column" command for you — you simply edit the file and
 re-apply.
 
-While iterating, `cambrian watch --path cambrian.toml` runs the same
+While iterating, `saltation watch --path saltation.toml` runs the same
 apply loop on every file save. Ctrl-C exits.
 
 ## Step 5: Commit
@@ -222,7 +222,7 @@ apply loop on every file save. Ctrl-C exits.
 When you're happy with the in-flight state, freeze it:
 
 ```bash
-cambrian commit -m "users table v1" --json --path cambrian.toml
+saltation commit -m "users table v1" --json --path saltation.toml
 ```
 
 ```json
@@ -231,7 +231,7 @@ cambrian commit -m "users table v1" --json --path cambrian.toml
   "evolution_id": "0001_users-table-v1",
   "committed_path": ".../examples/committed/0001_users-table-v1.sql",
   "evolution_hash": "b047b2d8bda5…",
-  "tag_ref": "cambrian.committed.1.users-table-v1",
+  "tag_ref": "saltation.committed.1.users-table-v1",
   "event_id": "...",
   "affected_tables": ["demo.users"]
 }
@@ -242,9 +242,9 @@ Three things happened:
 1. `current.sql` was renamed to `committed/0001_users-table-v1.sql` and
    replaced with an empty file. `current.sql` is yours again to start
    the next iteration.
-2. A `commit` event was recorded in `_cambrian.events`.
-3. Iceberg tag refs `cambrian.committed.1.users-table-v1` (and a
-   per-table `cambrian.cp.0001_users-table-v1`) pin the post-commit
+2. A `commit` event was recorded in `_saltation.events`.
+3. Iceberg tag refs `saltation.committed.1.users-table-v1` (and a
+   per-table `saltation.cp.0001_users-table-v1`) pin the post-commit
    snapshots so Iceberg's snapshot expiration won't reclaim them.
 
 `committed/` is the contract between dev and prod: those files are
@@ -253,15 +253,15 @@ immutable, applied in order, and shipped via git.
 Inspect the audit trail:
 
 ```bash
-cambrian status --json --path cambrian.toml
+saltation status --json --path saltation.toml
 ```
 
 ```json
 # expected:
 {
   "initialized": true,
-  "sidecar_namespace": "_cambrian",
-  "sidecar_version": 1,
+  "sidecar_namespace": "_saltation",
+  "sidecar_version": 2,
   "committed_count": 1,
   "committed_evolutions": [
     {
@@ -277,17 +277,17 @@ cambrian status --json --path cambrian.toml
 ## Step 6: Production replay
 
 The CI side of the contract: on a fresh checkout (or a fresh node in a
-deploy pipeline), `cambrian sync` rehydrates the local `committed/`
+deploy pipeline), `saltation sync` rehydrates the local `committed/`
 directory from the catalog. The catalog is the source of truth.
 
 Simulate a fresh clone:
 
 ```bash
 mkdir -p fresh-clone
-cp cambrian.toml fresh-clone/
+cp saltation.toml fresh-clone/
 cd fresh-clone
 
-cambrian sync --json --path cambrian.toml
+saltation sync --json --path saltation.toml
 ```
 
 ```json
@@ -315,11 +315,11 @@ ls committed/
 A second `sync` is a clean no-op (`written: 0`, `skipped: 1`):
 
 ```bash
-cambrian sync --json --path cambrian.toml
+saltation sync --json --path saltation.toml
 ```
 
-In a real deploy, CI runs `cambrian sync` (to rehydrate), then
-`cambrian apply` — which replays any committed evolutions the catalog
+In a real deploy, CI runs `saltation sync` (to rehydrate), then
+`saltation apply` — which replays any committed evolutions the catalog
 hasn't yet recorded, then re-checks `current.sql`. Same binary, same
 flags, idempotent end state.
 
@@ -333,7 +333,7 @@ cd ..
 
 Some evolutions genuinely cannot be expressed idempotently — a column
 type change with data loss, a rebuild of a partitioned table, etc.
-That's what `cambrian apply --reset` is for: it captures (or reuses) a
+That's what `saltation apply --reset` is for: it captures (or reuses) a
 checkpoint of every affected table, rolls the tables back to it, and
 re-runs `current.sql` from scratch.
 

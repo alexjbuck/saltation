@@ -4,9 +4,13 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Nightly soak: same suites, large Hypothesis budget (see tests/conftest.py).
+    - cron: "17 7 * * *"
 
+# The event name keeps the nightly soak out of main's push group.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -42,15 +46,24 @@ jobs:
         run: uv run ty check src tests
 
       - name: pytest (unit)
+        env:
+          HYPOTHESIS_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
         run: uv run pytest tests/unit -n auto
 
   integration:
-    name: integration (docker-compose rig)
+    name: integration (${{ matrix.catalog }})
     needs: lint-type-test
     runs-on: ubuntu-latest
-    # Single Python pin: the integration suite exercises Lakekeeper +
-    # rustfs over docker-compose, so the matrix sweep from lint-type-test
-    # would add cost without value.
+    # One job per REST catalog, each on its latest stable release (pins in
+    # docker/**/compose.yml); tests/integration/rig.py maps the name to a
+    # stack and client properties. Single Python pin: the sweep from
+    # lint-type-test would add cost without value.
+    strategy:
+      fail-fast: false
+      matrix:
+        catalog: [lakekeeper, polaris, gravitino]
+    env:
+      SALTATION_TEST_CATALOG: ${{ matrix.catalog }}
     steps:
       - uses: actions/checkout@v5
 
@@ -71,7 +84,7 @@ jobs:
 
       - name: Map host.docker.internal to localhost
         # The rustfs storage endpoint vended to clients is
-        # http://host.docker.internal:9000 so that both the lakekeeper
+        # http://host.docker.internal:9000 so that both the catalog
         # container (via host-gateway) and the host-side test process
         # resolve to the same place. Docker Desktop populates this entry
         # on macOS/Windows automatically; Linux GHA runners do not.
@@ -81,33 +94,38 @@ jobs:
         # The fixture brings the stack up with docker compose up -d
         # (no --wait, see conftest for the rationale) and tears it down
         # on exit, so no separate compose step is needed.
+        env:
+          HYPOTHESIS_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
         run: uv run pytest tests/integration -v
 
-      - name: V1 smoke - cambrian apply --json
+      - name: V1 smoke - saltation apply --json
         # Re-bring up the stack (pytest's session fixture tore it down on
         # exit) and exercise the production code path end-to-end: the same
         # command and JSON-parse pipeline a CI deploy would run.
         env:
           UV_PROJECT_ENVIRONMENT: .venv
-          SMOKE_TOML: tests/fixtures/v1-smoke/cambrian.toml
         run: |
-          docker compose -f docker/compose.yml up -d
-          for _ in $(seq 1 60); do
-            if curl -fsS http://localhost:8181/health >/dev/null 2>&1 \
-              && docker compose -f docker/compose.yml ps -a \
-                  --format '{{.Service}} {{.ExitCode}}' \
-                  | grep -q '^bootstrap 0$'; then
+          compose=$(uv run python -m tests.integration.rig compose)
+          health=$(uv run python -m tests.integration.rig health)
+          smoke_toml="$RUNNER_TEMP/saltation.toml"
+          { uv run python -m tests.integration.rig toml; cat tests/fixtures/v1-smoke/saltation.toml; } > "$smoke_toml"
+          docker compose -f "$compose" up -d
+          for _ in $(seq 1 90); do
+            if curl -fsS "$health" >/dev/null 2>&1 \
+              && docker compose -f "$compose" ps -a \
+                  --format '{{.Service}} {{.State}} {{.ExitCode}}' \
+                  | grep -q '^bootstrap exited 0$'; then
               break
             fi
             sleep 2
           done
-          uv run cambrian init --path "$SMOKE_TOML"
-          uv run cambrian apply --json --path "$SMOKE_TOML" | tee /tmp/apply.json
+          uv run saltation init --path "$smoke_toml"
+          uv run saltation apply --json --path "$smoke_toml" | tee /tmp/apply.json
           status=$(jq -r .status /tmp/apply.json)
           test "$status" = "applied" || test "$status" = "unchanged"
-          uv run cambrian apply --json --path "$SMOKE_TOML" | tee /tmp/apply2.json
+          uv run saltation apply --json --path "$smoke_toml" | tee /tmp/apply2.json
           test "$(jq -r .status /tmp/apply2.json)" = "unchanged"
 
       - name: Dump compose logs on failure
         if: failure()
-        run: docker compose -f docker/compose.yml logs --no-color || true
+        run: docker compose -f "$(uv run python -m tests.integration.rig compose)" logs --no-color || true

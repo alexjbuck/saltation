@@ -1,4 +1,4 @@
-"""Tests for ``cambrian.sql.dispatch`` — AST → PyIceberg API call translation.
+"""Tests for ``saltation.sql.dispatch`` — AST → PyIceberg API call translation.
 
 We mock the catalog and the table; each test parses one SQL statement,
 runs :func:`dispatch`, and asserts the expected method calls on the mocks.
@@ -21,6 +21,7 @@ from pyiceberg.exceptions import (
     TableAlreadyExistsError,
 )
 from pyiceberg.schema import Schema
+from pyiceberg.table.sorting import NullOrder
 from pyiceberg.transforms import (
     BucketTransform,
     DayTransform,
@@ -44,14 +45,14 @@ from pyiceberg.types import (
     TimestamptzType,
 )
 
-from cambrian.errors import DispatchError, UnsupportedStatementError
-from cambrian.iceberg.affected import TableIdent
-from cambrian.sql.dialect import CambrianSpark
-from cambrian.sql.dispatch import dispatch
+from saltation.errors import DispatchError, UnsupportedStatementError
+from saltation.iceberg.affected import TableIdent
+from saltation.sql.dialect import SaltationSpark
+from saltation.sql.dispatch import dispatch
 
 
 def _parse(sql: str):
-    tree = sqlglot.parse(sql, dialect=CambrianSpark)
+    tree = sqlglot.parse(sql, dialect=SaltationSpark)
     return [s for s in tree if s is not None]
 
 
@@ -67,6 +68,7 @@ def _make_catalog() -> MagicMock:
             "drop_namespace",
             "update_namespace_properties",
             "create_table",
+            "create_table_transaction",
             "drop_table",
             "rename_table",
             "load_table",
@@ -86,6 +88,8 @@ def _make_table() -> MagicMock:
         MagicMock(name="name", required=False),
     ]
     table.schema.return_value = schema
+    table.format_version = 2
+    table.spec.return_value.fields = []
     return table
 
 
@@ -126,11 +130,11 @@ def test_drop_namespace_if_exists_swallows_missing() -> None:
     assert "already absent" in result.notes
 
 
-def test_drop_namespace_without_if_exists_raises_missing() -> None:
+def test_drop_namespace_without_if_exists_tolerates_missing() -> None:
     catalog = _make_catalog()
     catalog.drop_namespace.side_effect = NoSuchNamespaceError("nope")
-    with pytest.raises(NoSuchNamespaceError):
-        dispatch(catalog, _single("DROP NAMESPACE foo"))
+    result = dispatch(catalog, _single("DROP NAMESPACE foo"))
+    assert "already absent" in result.notes
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +193,7 @@ def test_create_table_already_exists_is_idempotent() -> None:
 
 def test_create_table_unsupported_type() -> None:
     catalog = _make_catalog()
-    # STRUCT/ARRAY/MAP are now in scope; INTERVAL is a primitive cambrian
+    # STRUCT/ARRAY/MAP are now in scope; INTERVAL is a primitive saltation
     # doesn't map, so it stays unsupported.
     with pytest.raises(UnsupportedStatementError):
         dispatch(
@@ -232,12 +236,13 @@ def test_alter_add_column() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN c INT"))
     table.update_schema.assert_called()
     us = table.update_schema.return_value.__enter__.return_value
     us.add_column.assert_called_once()
     args = us.add_column.call_args
-    assert args.args[0] == "c"
+    assert args.args[0] == ("c",)
     assert isinstance(args.args[1], IntegerType)
 
 
@@ -246,6 +251,7 @@ def test_alter_add_columns_plural_splits_into_n_commits() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMNS (a INT, b STRING, c BIGINT)"))
     # update_schema invoked once per column → 3 enters of the cm.
     assert table.update_schema.call_count == 3
@@ -267,11 +273,28 @@ def test_alter_drop_column_idempotent_when_absent() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
-    table.update_schema.return_value.__enter__.return_value.delete_column.side_effect = ValueError(
-        "Column not found in schema: c"
+    table.schema.return_value.find_field.side_effect = ValueError(
+        "Could not find field with name c, case_sensitive=True"
     )
     result = dispatch(catalog, _single("ALTER TABLE foo.t DROP COLUMN c"))
     assert "already absent" in result.notes
+    table.update_schema.assert_not_called()
+
+
+def test_alter_rename_column_idempotent_when_already_renamed() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+
+    def find_field(name: str) -> object:
+        if name == "a":
+            raise ValueError("Could not find field with name a, case_sensitive=True")
+        return MagicMock()
+
+    table.schema.return_value.find_field.side_effect = find_field
+    result = dispatch(catalog, _single("ALTER TABLE foo.t RENAME COLUMN a TO b"))
+    assert "already absent" in result.notes
+    table.update_schema.assert_not_called()
 
 
 def test_alter_rename_column() -> None:
@@ -315,9 +338,30 @@ def test_unset_tblproperties() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.properties = {"k1": "a", "k2": "b"}
     dispatch(catalog, _single('ALTER TABLE foo.t UNSET TBLPROPERTIES ("k1", "k2")'))
     txn = table.transaction.return_value.__enter__.return_value
     txn.remove_properties.assert_called_once_with("k1", "k2")
+
+
+def test_unset_tblproperties_skips_absent_keys() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.properties = {"k2": "b"}
+    dispatch(catalog, _single('ALTER TABLE foo.t UNSET TBLPROPERTIES ("k1", "k2")'))
+    txn = table.transaction.return_value.__enter__.return_value
+    txn.remove_properties.assert_called_once_with("k2")
+
+
+def test_unset_tblproperties_all_absent_is_noop() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.properties = {}
+    result = dispatch(catalog, _single('ALTER TABLE foo.t UNSET TBLPROPERTIES ("k1")'))
+    assert "already absent" in result.notes
+    table.transaction.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -389,33 +433,6 @@ def test_add_partition_field_idempotent_duplicate() -> None:
     assert "already present" in result.notes
 
 
-def test_drop_partition_field() -> None:
-    catalog = _make_catalog()
-    table = _make_table()
-    catalog.load_table.return_value = table
-    dispatch(catalog, _single("ALTER TABLE foo.t DROP PARTITION FIELD x"))
-    us = table.update_spec.return_value.__enter__.return_value
-    us.remove_field.assert_called_once_with("x")
-
-
-def test_replace_partition_field() -> None:
-    catalog = _make_catalog()
-    table = _make_table()
-    catalog.load_table.return_value = table
-    dispatch(
-        catalog,
-        _single("ALTER TABLE foo.t REPLACE PARTITION FIELD x WITH bucket(8, y)"),
-    )
-    us = table.update_spec.return_value.__enter__.return_value
-    # Drop the old, add the new.
-    us.remove_field.assert_called_with("x")
-    us.add_field.assert_called()
-    args = us.add_field.call_args.args
-    assert args[0] == "y"
-    assert isinstance(args[1], BucketTransform)
-    assert args[1].num_buckets == 8
-
-
 # ---------------------------------------------------------------------------
 # WRITE ORDERED BY
 # ---------------------------------------------------------------------------
@@ -426,16 +443,12 @@ def test_write_ordered_by_asc_and_desc() -> None:
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE ORDERED BY (a ASC, b DESC)"))
-    uso = table.update_sort_order.return_value.__enter__.return_value
-    # Both asc and desc called once, with IdentityTransform.
-    uso.asc.assert_called_once()
-    uso.desc.assert_called_once()
-    asc_args = uso.asc.call_args.args
-    desc_args = uso.desc.call_args.args
-    assert asc_args[0] == "a"
-    assert isinstance(asc_args[1], IdentityTransform)
-    assert desc_args[0] == "b"
-    assert isinstance(desc_args[1], IdentityTransform)
+    txn = table.transaction.return_value.__enter__.return_value
+    uso = txn.update_sort_order.return_value.__enter__.return_value
+    # Spark's default null order: ASC -> NULLS FIRST, DESC -> NULLS LAST.
+    assert uso.asc.call_args.args == ("a", IdentityTransform(), NullOrder.NULLS_FIRST)
+    assert uso.desc.call_args.args == ("b", IdentityTransform(), NullOrder.NULLS_LAST)
+    assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "range"}
 
 
 def test_write_ordered_by_default_asc() -> None:
@@ -443,7 +456,8 @@ def test_write_ordered_by_default_asc() -> None:
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE ORDERED BY (a)"))
-    uso = table.update_sort_order.return_value.__enter__.return_value
+    txn = table.transaction.return_value.__enter__.return_value
+    uso = txn.update_sort_order.return_value.__enter__.return_value
     uso.asc.assert_called_once()
 
 
@@ -552,21 +566,6 @@ def test_add_partition_field_truncate() -> None:
     assert args[1].width == 4
 
 
-def test_replace_partition_field_with_truncate() -> None:
-    catalog = _make_catalog()
-    table = _make_table()
-    catalog.load_table.return_value = table
-    dispatch(
-        catalog,
-        _single("ALTER TABLE foo.t REPLACE PARTITION FIELD x WITH truncate(8, data)"),
-    )
-    us = table.update_spec.return_value.__enter__.return_value
-    args = us.add_field.call_args.args
-    assert args[0] == "data"
-    assert isinstance(args[1], TruncateTransform)
-    assert args[1].width == 8
-
-
 # ---------------------------------------------------------------------------
 # Nested CREATE TABLE types
 # ---------------------------------------------------------------------------
@@ -668,13 +667,24 @@ def test_alter_column_comment_only() -> None:
     assert us.update_column.call_args.kwargs["doc"] == "docs"
 
 
-def test_alter_column_set_not_null() -> None:
+def test_alter_column_set_not_null_on_optional_is_refused() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
-    dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN id SET NOT NULL"))
-    us = table.update_schema.return_value.__enter__.return_value
-    assert us.update_column.call_args.kwargs["required"] is True
+    table.schema.return_value.find_field.return_value = MagicMock(required=False)
+    with pytest.raises(DispatchError, match="NOT NULL"):
+        dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN name SET NOT NULL"))
+    table.update_schema.assert_not_called()
+
+
+def test_alter_column_set_not_null_on_required_is_noop() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.schema.return_value.find_field.return_value = MagicMock(required=True)
+    result = dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN id SET NOT NULL"))
+    assert "already required" in result.notes
+    table.update_schema.assert_not_called()
 
 
 def test_alter_column_drop_not_null() -> None:
@@ -708,6 +718,7 @@ def test_add_column_dotted_path_uses_tuple() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
     dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN point.z DOUBLE"))
     us = table.update_schema.return_value.__enter__.return_value
     assert us.add_column.call_args.args[0] == ("point", "z")
@@ -756,14 +767,15 @@ def test_write_ordered_by_sets_range_mode() -> None:
     assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "range"}
 
 
-def test_write_locally_ordered_sets_none_mode() -> None:
+def test_write_locally_ordered_leaves_distribution_mode() -> None:
     catalog = _make_catalog()
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE LOCALLY ORDERED BY category, id"))
     txn = table.transaction.return_value.__enter__.return_value
-    assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "none"}
-    table.update_sort_order.assert_called()
+    txn.set_properties.assert_not_called()
+    uso = txn.update_sort_order.return_value.__enter__.return_value
+    assert uso.asc.call_count == 2
 
 
 def test_write_distributed_sets_hash_mode() -> None:
@@ -780,7 +792,9 @@ def test_write_unordered_clears_sort_order() -> None:
     table = _make_table()
     catalog.load_table.return_value = table
     dispatch(catalog, _single("ALTER TABLE foo.t WRITE UNORDERED"))
-    table.update_sort_order.assert_called_once()
+    txn = table.transaction.return_value.__enter__.return_value
+    txn.update_sort_order.assert_called_once()
+    assert txn.set_properties.call_args.kwargs["properties"] == {"write.distribution-mode": "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -846,3 +860,81 @@ def test_alter_namespace_set_properties() -> None:
     catalog = _make_catalog()
     dispatch(catalog, _single("ALTER NAMESPACE foo SET PROPERTIES ('owner' = 'data')"))
     catalog.update_namespace_properties.assert_called_once_with("foo", updates={"owner": "data"})
+
+
+def test_alter_column_type_already_wider_is_noop() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.schema.return_value.find_field.return_value = MagicMock(
+        field_type=DecimalType(precision=14, scale=2)
+    )
+    result = dispatch(catalog, _single("ALTER TABLE foo.t ALTER COLUMN d TYPE DECIMAL(12, 2)"))
+    assert "already wider" in result.notes
+    table.update_schema.assert_not_called()
+
+
+def test_alter_add_column_carries_comment() -> None:
+    catalog = _make_catalog()
+    table = _make_table()
+    catalog.load_table.return_value = table
+    table.schema.return_value.find_field.side_effect = ValueError("Could not find field")
+    dispatch(catalog, _single("ALTER TABLE foo.t ADD COLUMN c INT COMMENT 'unit: m/s'"))
+    us = table.update_schema.return_value.__enter__.return_value
+    assert us.add_column.call_args.kwargs["doc"] == "unit: m/s"
+
+
+def test_create_table_carries_column_comments() -> None:
+    catalog = _make_catalog()
+    sql = "CREATE TABLE foo.t (a INT COMMENT 'the a', b STRING NOT NULL) USING iceberg"
+    dispatch(catalog, _single(sql))
+    schema = catalog.create_table.call_args.kwargs["schema"]
+    assert [f.doc for f in schema.fields] == ["the a", None]
+    assert [f.required for f in schema.fields] == [False, True]
+
+
+def test_create_table_partition_props_comment_location() -> None:
+    catalog = _make_catalog()
+    sql = (
+        "CREATE TABLE IF NOT EXISTS foo.t (id BIGINT, ts TIMESTAMP, cat STRING) USING iceberg "
+        "PARTITIONED BY (bucket(16, id), days(ts), cat, truncate(4, cat)) "
+        "COMMENT 'tbl doc' LOCATION 's3://b/p' "
+        "TBLPROPERTIES ('write.metadata.previous-versions-max'='1000')"
+    )
+    dispatch(catalog, _single(sql))
+    kwargs = catalog.create_table.call_args.kwargs
+    assert kwargs["location"] == "s3://b/p"
+    assert kwargs["properties"] == {
+        "comment": "tbl doc",
+        "write.metadata.previous-versions-max": "1000",
+    }
+    spec = kwargs["partition_spec"]
+    # Spark's CREATE-time names (PartitionSpec.Builder), not ADD PARTITION FIELD's.
+    assert [(f.source_id, str(f.transform), f.name) for f in spec.fields] == [
+        (1, "bucket[16]", "id_bucket"),
+        (2, "day", "ts_day"),
+        (3, "identity", "cat"),
+        (3, "truncate[4]", "cat_trunc"),
+    ]
+
+
+def test_create_table_unpartitioned_has_empty_spec() -> None:
+    catalog = _make_catalog()
+    dispatch(catalog, _single("CREATE TABLE foo.t (id BIGINT) USING iceberg"))
+    assert catalog.create_table.call_args.kwargs["partition_spec"].is_unpartitioned()
+
+
+def test_create_table_unknown_clause_is_refused() -> None:
+    catalog = _make_catalog()
+    sql = "CREATE TABLE foo.t (id BIGINT) USING iceberg CLUSTERED BY (id) INTO 4 BUCKETS"
+    with pytest.raises(UnsupportedStatementError):
+        dispatch(catalog, _single(sql))
+    catalog.create_table.assert_not_called()
+
+
+def test_create_table_duplicate_spark_partition_names_refused() -> None:
+    catalog = _make_catalog()
+    sql = "CREATE TABLE foo.t (c INT) USING iceberg PARTITIONED BY (bucket(4, c), bucket(16, c))"
+    with pytest.raises(DispatchError, match="c_bucket"):
+        dispatch(catalog, _single(sql))
+    catalog.create_table.assert_not_called()

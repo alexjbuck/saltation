@@ -1,4 +1,4 @@
-"""Integration tests for ``cambrian apply`` in idempotent mode.
+"""Integration tests for ``saltation apply`` in idempotent mode.
 
 These exercise the full M5 stack against a live Lakekeeper rig:
 
@@ -22,41 +22,30 @@ from pathlib import Path
 import pytest
 from pyiceberg.catalog.rest import RestCatalog
 
-from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig
-from cambrian.errors import UnsupportedStatementError
-from cambrian.migrate import apply_idempotent
-from cambrian.sidecar.events import latest_event
+from saltation.config import EvolutionsConfig, SaltationConfig, ViewsConfig
+from saltation.errors import UnsupportedStatementError
+from saltation.migrate import apply_idempotent
+from saltation.sidecar.events import latest_event
 
 # Re-use the rig coordinates from conftest.py. Keeping these as constants
 # rather than importing the fixture's internals so the integration tests
 # stay independent of conftest implementation details.
-LAKEKEEPER_URL = "http://localhost:8181"
-WAREHOUSE = "cambrian"
+from .rig import catalog_config
+from .rig import rest_catalog as rig_catalog
 
 
 def _build_config(
     *,
     evolutions_dir: Path,
     sidecar_namespace: str,
-) -> CambrianConfig:
-    """Construct a CambrianConfig pointing at the test rig.
+) -> SaltationConfig:
+    """Construct a SaltationConfig pointing at the test rig.
 
     Bypasses TOML parsing so each test can spin up a unique sidecar namespace
     without touching the filesystem outside ``tmp_path``.
     """
-    return CambrianConfig(
-        catalog=CatalogConfig(
-            type="rest",
-            uri=f"{LAKEKEEPER_URL}/catalog",
-            **{  # extras forwarded to PyIceberg
-                "warehouse": WAREHOUSE,
-                "s3.endpoint": "http://localhost:9000",
-                "s3.access-key-id": "cambrian-access-key",
-                "s3.secret-access-key": "cambrian-secret-key",
-                "s3.region": "local",
-                "s3.path-style-access": "true",
-            },
-        ),
+    return SaltationConfig(
+        catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
             sidecar_namespace=sidecar_namespace,
@@ -76,11 +65,11 @@ def _write_current(evolutions_dir: Path, sql: str) -> Path:
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
     """A unique sidecar namespace per test; cleaned up after.
 
-    cambrian's own ``_cambrian_test_<uuid>`` namespace; on teardown drop the
+    saltation's own ``_saltation_test_<uuid>`` namespace; on teardown drop the
     three sidecar tables we created. The ``ns`` fixture from conftest is
     used separately for user-facing tables.
     """
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     # Teardown: drop sidecar tables (if present) and the namespace.
     from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
@@ -113,20 +102,8 @@ def test_apply_creates_namespace_and_table(
     assert result1.error is None
 
     # Verify table exists and has two rows.
-    from pyiceberg.catalog.rest import RestCatalog as _RC
 
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     arrow = table.scan().to_arrow()
     assert arrow.num_rows == 2
@@ -164,20 +141,7 @@ def test_apply_edit_reapplies(
     result2 = apply_idempotent(cfg)
     assert result2.status == "applied"
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     fields = [f.name for f in table.schema().fields]
     assert "added" in fields
@@ -200,20 +164,7 @@ def test_apply_multi_column_alter_splits(
     result = apply_idempotent(cfg)
     assert result.status == "applied"
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     names = [f.name for f in table.schema().fields]
     assert names == ["id", "a", "b", "c"]
@@ -247,20 +198,7 @@ def test_apply_include(rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidec
     result = apply_idempotent(cfg)
     assert result.status == "applied", result
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     table = catalog.load_table((ns, "t"))
     arrow = table.scan().to_arrow()
     assert arrow.num_rows == 1
@@ -324,3 +262,34 @@ def test_apply_emits_event_with_table_states(
     assert event.event_id == result.event_id
     assert event.evolution_hash == result.evolution_hash
     assert event.evolution_sql == sql
+
+
+def test_apply_creates_view_in_configured_dialects(
+    rest_catalog: RestCatalog, ns: str, tmp_path: Path, sidecar_ns: str
+) -> None:
+    """The runner threads [views].dialects through to CREATE VIEW, and re-apply is a no-op."""
+    evolutions = tmp_path / "evolutions"
+    _write_current(
+        evolutions,
+        f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
+        f"CREATE OR REPLACE VIEW {ns}.v AS SELECT id, upper(name) AS n FROM {ns}.t;\n",
+    )
+    cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
+    cfg = cfg.model_copy(update={"views": ViewsConfig(dialects=["spark", "trino"])})
+
+    assert apply_idempotent(cfg).status == "applied"
+    view = rest_catalog.load_view((ns, "v"))
+    dialects = {r.root.dialect for r in view.current_version().representations}
+    assert dialects == {"spark", "trino"}
+    assert [f.name for f in view.schema().fields] == ["id", "n"]
+
+    # Edit an unrelated line so the hash changes and the whole file re-runs.
+    _write_current(
+        evolutions,
+        f"CREATE TABLE IF NOT EXISTS {ns}.t (id BIGINT, name STRING) USING iceberg;\n"
+        f"CREATE OR REPLACE VIEW {ns}.v AS SELECT id, upper(name) AS n FROM {ns}.t;\n"
+        f"CREATE TABLE IF NOT EXISTS {ns}.u (id BIGINT) USING iceberg;\n",
+    )
+    assert apply_idempotent(cfg).status == "applied"
+    assert len(rest_catalog.load_view((ns, "v")).metadata.versions) == 1
+    rest_catalog.drop_view((ns, "v"))

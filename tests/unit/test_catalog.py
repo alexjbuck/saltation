@@ -1,4 +1,4 @@
-"""Unit tests for ``cambrian.catalog``.
+"""Unit tests for ``saltation.catalog``.
 
 We don't actually want to talk to a real catalog from a unit test, so we
 monkeypatch :func:`pyiceberg.catalog.load_catalog` and assert the kwargs we
@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from cambrian import catalog as cambrian_catalog
-from cambrian.catalog import CATALOG_NAME, load_catalog
-from cambrian.config import load_config
+from saltation import catalog as saltation_catalog
+from saltation.catalog import CATALOG_NAME, load_catalog
+from saltation.config import load_config
 
 
 class _FakeCatalog:
@@ -31,12 +31,12 @@ def _capture_load_catalog(
         captured["properties"] = properties
         return _FakeCatalog()
 
-    monkeypatch.setattr(cambrian_catalog, "_pyiceberg_load_catalog", fake)
+    monkeypatch.setattr(saltation_catalog, "_pyiceberg_load_catalog", fake)
     return captured
 
 
 def _write_cfg(tmp_path: Path, body: str) -> Path:
-    path = tmp_path / "cambrian.toml"
+    path = tmp_path / "saltation.toml"
     path.write_text(body)
     return path
 
@@ -100,5 +100,5 @@ uri = "sqlite:///:memory:"
     )
     load_catalog(cfg)
     # PyIceberg uses this name only for its config-file lookup; we always
-    # pass "cambrian" so behavior is reproducible.
-    assert captured["name"] == "cambrian"
+    # pass "saltation" so behavior is reproducible.
+    assert captured["name"] == "saltation"

@@ -1,4 +1,4 @@
-"""Integration tests for ``cambrian sync``.
+"""Integration tests for ``saltation sync``.
 
 Exercises the catalog-truth-source contract end-to-end against Lakekeeper:
 
@@ -19,33 +19,21 @@ import pytest
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, CatalogConfig, EvolutionsConfig
-from cambrian.migrate import apply_idempotent
-from cambrian.migrate.commit import (
-    cambrian_commit,
-    cambrian_uncommit,
+from saltation.config import EvolutionsConfig, SaltationConfig
+from saltation.migrate import apply_idempotent
+from saltation.migrate.commit import (
+    saltation_commit,
+    saltation_uncommit,
 )
-from cambrian.migrate.sync import cambrian_sync
-from cambrian.sidecar.events import committed_evolutions
+from saltation.migrate.sync import saltation_sync
+from saltation.sidecar.events import committed_evolutions
 
-LAKEKEEPER_URL = "http://localhost:8181"
-WAREHOUSE = "cambrian"
+from .rig import catalog_config
 
 
-def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> CambrianConfig:
-    return CambrianConfig(
-        catalog=CatalogConfig(
-            type="rest",
-            uri=f"{LAKEKEEPER_URL}/catalog",
-            **{
-                "warehouse": WAREHOUSE,
-                "s3.endpoint": "http://localhost:9000",
-                "s3.access-key-id": "cambrian-access-key",
-                "s3.secret-access-key": "cambrian-secret-key",
-                "s3.region": "local",
-                "s3.path-style-access": "true",
-            },
-        ),
+def _build_config(*, evolutions_dir: Path, sidecar_namespace: str) -> SaltationConfig:
+    return SaltationConfig(
+        catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
             sidecar_namespace=sidecar_namespace,
@@ -60,7 +48,7 @@ def _write(path: Path, content: str) -> None:
 
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     try:
         for ident in rest_catalog.list_tables(namespace):
@@ -90,20 +78,20 @@ def test_sync_cross_instance_roundtrip(
     _write(evolutions_a / "current.sql", sql1)
     cfg_a = _build_config(evolutions_dir=evolutions_a, sidecar_namespace=sidecar_ns)
     apply_idempotent(cfg_a)
-    cambrian_commit(cfg_a, message="seed")
+    saltation_commit(cfg_a, message="seed")
 
     # Second evolution.
     sql2 = f"ALTER TABLE {ns}.t ADD COLUMN name STRING;\n"
     _write(evolutions_a / "current.sql", sql2)
     apply_idempotent(cfg_a)
-    cambrian_commit(cfg_a, message="add name")
+    saltation_commit(cfg_a, message="add name")
 
     # Now run sync from a fresh empty directory.
     evolutions_b = tmp_path / "evolutions_b"
     evolutions_b.mkdir()
     cfg_b = _build_config(evolutions_dir=evolutions_b, sidecar_namespace=sidecar_ns)
 
-    result = cambrian_sync(cfg_b)
+    result = saltation_sync(cfg_b)
 
     assert result.written == 2
     assert result.refused == 0
@@ -122,7 +110,7 @@ def test_sync_cross_instance_roundtrip(
     assert file_2.read_text(encoding="utf-8") == file_2_a.read_text(encoding="utf-8")
 
     # Re-running sync against the synced directory is a clean no-op (all skipped).
-    second = cambrian_sync(cfg_b)
+    second = saltation_sync(cfg_b)
     assert second.written == 0
     assert second.skipped == 2
     assert not second.has_refusals
@@ -141,28 +129,28 @@ def test_sync_refuses_tampered_local_file(
     _write(evolutions / "current.sql", sql)
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
     apply_idempotent(cfg)
-    commit_result = cambrian_commit(cfg, message="seed")
+    commit_result = saltation_commit(cfg, message="seed")
 
     # Tamper with the local file.
     tampered = sql + f"-- evil edit\nALTER TABLE {ns}.t ADD COLUMN evil STRING;\n"
     commit_result.committed_path.write_text(tampered, encoding="utf-8")
 
     # Sync refuses.
-    result = cambrian_sync(cfg)
+    result = saltation_sync(cfg)
     assert result.refused == 1
     assert result.has_refusals
     # File is still tampered.
     assert commit_result.committed_path.read_text(encoding="utf-8") == tampered
 
     # With --diff (dry-run) we get a diff payload but the file remains tampered.
-    diffed = cambrian_sync(cfg, diff=True)
+    diffed = saltation_sync(cfg, diff=True)
     assert diffed.refused == 1
     assert diffed.files[0].diff is not None
     assert "evil" in diffed.files[0].diff
     assert commit_result.committed_path.read_text(encoding="utf-8") == tampered
 
     # --force overwrites.
-    forced = cambrian_sync(cfg, force=True)
+    forced = saltation_sync(cfg, force=True)
     assert forced.overwritten == 1
     assert forced.refused == 0
     assert commit_result.committed_path.read_text(encoding="utf-8") == sql
@@ -185,11 +173,11 @@ def test_sync_excludes_uncommitted(
     _write(evolutions / "current.sql", sql)
     cfg = _build_config(evolutions_dir=evolutions, sidecar_namespace=sidecar_ns)
     apply_idempotent(cfg)
-    cambrian_commit(cfg, message="seed")
-    cambrian_uncommit(cfg)
+    saltation_commit(cfg, message="seed")
+    saltation_uncommit(cfg)
 
     # Confirm via the events log that no live commits remain.
-    from cambrian.catalog import load_catalog
+    from saltation.catalog import load_catalog
 
     catalog = load_catalog(cfg)
     live = committed_evolutions(catalog, sidecar_ns)
@@ -199,7 +187,7 @@ def test_sync_excludes_uncommitted(
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     cfg_fresh = _build_config(evolutions_dir=fresh, sidecar_namespace=sidecar_ns)
-    result = cambrian_sync(cfg_fresh)
+    result = saltation_sync(cfg_fresh)
 
     assert result.files == []
     assert result.written == 0

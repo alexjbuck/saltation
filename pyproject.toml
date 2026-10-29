@@ -1,5 +1,5 @@
 [project]
-name = "cambrian"
+name = "saltation"
 version = "0.1.0"
 description = "SQL-driven table evolution runner for Apache Iceberg tables, powered by PyIceberg."
 readme = "README.md"
@@ -19,24 +19,24 @@ classifiers = [
 dependencies = [
   "pyarrow>=24.0.0",
   "pydantic>=2.13.4",
-  "pyiceberg>=0.11.1",
+  "pyiceberg[pyiceberg-core]>=0.12.0",
   "sqlglot>=30.8.0",
   "typer>=0.25.1",
   "watchfiles>=1.2.0",
 ]
 
 [project.scripts]
-cambrian = "cambrian.cli:app"
+saltation = "saltation.cli:app"
 
 [project.urls]
-Repository = "https://github.com/alexjbuck/cambrian"
+Repository = "https://github.com/alexjbuck/saltation"
 
 [build-system]
 requires = ["uv_build>=0.9.26,<0.10.0"]
 build-backend = "uv_build"
 
 [tool.uv.workspace]
-# Declare cambrian as its own workspace root so it doesn't get pulled into
+# Declare saltation as its own workspace root so it doesn't get pulled into
 # any parent pyproject.toml's workspace.
 members = ["."]
 

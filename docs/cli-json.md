@@ -1,4 +1,4 @@
-# cambrian CLI: JSON output schemas
+# saltation CLI: JSON output schemas
 
 Every mutating subcommand accepts `--json` and emits a single JSON document
 on stdout. Errors go to stderr. The exit code is the source of truth for
@@ -8,7 +8,7 @@ The schemas below use a relaxed JSON-Schema notation: `string`, `int`,
 `bool`, `list[T]`, `T | null` for optionality, `dict` for an unparsed
 object.
 
-Inside cambrian the canonical noun is **evolution** (matching Iceberg's
+Inside saltation the canonical noun is **evolution** (matching Iceberg's
 "schema evolution" / "partition evolution" vocabulary). The top-level
 README uses "migration" framing for discoverability — the JSON field
 names below all use `evolution_*`.
@@ -23,10 +23,10 @@ names below all use `evolution_*`.
 | 3    | sidecar is at a version newer than this binary    |
 | 4    | external write detected (rollback / sync refused)  |
 
-`cambrian init` and `cambrian status` are read-only; their exit codes
+`saltation init` and `saltation status` are read-only; their exit codes
 follow the same table.
 
-## `cambrian apply [--json]`
+## `saltation apply [--json]`
 
 ```
 {
@@ -53,7 +53,7 @@ follow the same table.
 }
 ```
 
-## `cambrian apply --reset [--json]` (alias: `cambrian redo`)
+## `saltation apply --reset [--json]` (alias: `saltation redo`)
 
 ```
 {
@@ -75,22 +75,22 @@ follow the same table.
 }
 ```
 
-`cambrian rollback --json` shares this schema.
+`saltation rollback --json` shares this schema.
 
-## `cambrian commit -m <msg> [--json]`
+## `saltation commit -m <msg> [--json]`
 
 ```
 {
   "evolution_id":     string,         // "NNNN_<slug>"
   "committed_path":   string,
   "evolution_hash":   string,
-  "tag_ref":          string,         // "cambrian.committed.<n>.<slug>"
+  "tag_ref":          string,         // "saltation.committed.<n>.<slug>"
   "event_id":         string | null,
   "affected_tables":  list[string]
 }
 ```
 
-## `cambrian uncommit [--json]`
+## `saltation uncommit [--json]`
 
 ```
 {
@@ -103,7 +103,7 @@ follow the same table.
 }
 ```
 
-## `cambrian reset-to <evolution_id> [--json]`
+## `saltation reset-to <evolution_id> [--json]`
 
 ```
 {
@@ -115,7 +115,7 @@ follow the same table.
 }
 ```
 
-## `cambrian sync [--json]` (alias: `cambrian download`)
+## `saltation sync [--json]` (alias: `saltation download`)
 
 ```
 {
@@ -140,7 +140,7 @@ follow the same table.
 Sync emits exit code `4` when `refused > 0` so CI can fail loud on a
 drifted checkout.
 
-## `cambrian status [--json]` (read-only)
+## `saltation status [--json]` (read-only)
 
 ```
 {

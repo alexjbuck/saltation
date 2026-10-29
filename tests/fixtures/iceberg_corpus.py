@@ -4,7 +4,7 @@ Each :class:`CorpusEntry` is one statement (or, rarely, a short multi-statement
 script) with a stable ``id``, a ``category``, the ``sql`` text, an ``expected``
 verdict (``"apply"`` for in-scope positives that must eventually parse AND
 dispatch cleanly, ``"reject"`` for out-of-scope statements that must surface as
-:class:`cambrian.errors.UnsupportedStatementError`), and a short ``note`` —
+:class:`saltation.errors.UnsupportedStatementError`), and a short ``note`` —
 usually citing the authoritative source.
 
 Sources (verified 2026-05-26):
@@ -27,7 +27,7 @@ from typing import Literal
 
 __all__ = ["CORPUS", "CorpusEntry", "negatives", "positives"]
 
-Expected = Literal["apply", "reject"]
+Expected = Literal["apply", "reject", "invalid"]
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class CorpusEntry:
     """One corpus statement and its expected end-to-end verdict.
 
     ``expected`` is the *contract*, not the current behaviour: ``"apply"``
-    entries are in cambrian's v1 scope and should parse and dispatch without
+    entries are in saltation's v1 scope and should parse and dispatch without
     error once the implementation is complete; ``"reject"`` entries are valid
     Iceberg/Spark SQL (or plausible syntax) deliberately out of scope, which
     must raise :class:`UnsupportedStatementError` rather than crash. The
@@ -52,6 +52,11 @@ class CorpusEntry:
 def positives() -> list[CorpusEntry]:
     """All in-scope entries (``expected == "apply"``)."""
     return [e for e in CORPUS if e.expected == "apply"]
+
+
+def invalids() -> list[CorpusEntry]:
+    """Valid syntax that Spark-Iceberg refuses as an evolution (``expected == "invalid"``)."""
+    return [e for e in CORPUS if e.expected == "invalid"]
 
 
 def negatives() -> list[CorpusEntry]:
@@ -396,8 +401,8 @@ CORPUS: list[CorpusEntry] = [
         "add_column_not_null",
         "schema_add",
         "ALTER TABLE foo.t ADD COLUMN c INT NOT NULL",
-        "apply",
-        "ADD COLUMN with NOT NULL.",
+        "invalid",
+        "Iceberg refuses a required column without a default (spec: Schema Evolution).",
     ),
     CorpusEntry(
         "add_column_first",
@@ -507,9 +512,9 @@ CORPUS: list[CorpusEntry] = [
     CorpusEntry(
         "alter_column_set_not_null",
         "schema_alter",
-        "ALTER TABLE foo.t ALTER COLUMN id SET NOT NULL",
-        "apply",
-        "SET NOT NULL (requirement tightening).",
+        "ALTER TABLE foo.t ALTER COLUMN name SET NOT NULL",
+        "invalid",
+        f"{_DDL}; SET NOT NULL is refused: Iceberg can't know existing rows are non-null.",
     ),
     CorpusEntry(
         "alter_column_drop_not_null",
@@ -592,6 +597,27 @@ CORPUS: list[CorpusEntry] = [
         "Drop by alias name.",
     ),
     CorpusEntry(
+        "dpf_column_of_aliased_identity",
+        "partition_evolution",
+        "ALTER TABLE foo.t DROP PARTITION FIELD category",
+        "apply",
+        "A bare column name means identity(column), whatever the field is named.",
+    ),
+    CorpusEntry(
+        "rpf_by_transform",
+        "partition_evolution",
+        "ALTER TABLE foo.t REPLACE PARTITION FIELD bucket(16, id) WITH bucket(8, id)",
+        "apply",
+        "The replaced field can be named by its transform.",
+    ),
+    CorpusEntry(
+        "rpf_missing",
+        "partition_evolution",
+        "ALTER TABLE foo.t REPLACE PARTITION FIELD nope WITH day(ts)",
+        "invalid",
+        "Replacing a field that isn't in the spec is an error, not a silent add.",
+    ),
+    CorpusEntry(
         "rpf_basic",
         "partition_evolution",
         "ALTER TABLE foo.t REPLACE PARTITION FIELD ts_day WITH day(ts)",
@@ -620,7 +646,7 @@ CORPUS: list[CorpusEntry] = [
         "sort_order",
         "ALTER TABLE foo.t WRITE ORDERED BY (category, id)",
         "apply",
-        "Parenthesised form (cambrian's existing tests use this).",
+        "Parenthesised form (saltation's existing tests use this).",
     ),
     CorpusEntry(
         "wob_asc_desc",
@@ -763,6 +789,385 @@ CORPUS: list[CorpusEntry] = [
         "DELETE FROM foo.t WHERE category = 'x' AND id > 10",
         "apply",
         "DELETE with compound predicate.",
+    ),
+    # =====================================================================
+    # POSITIVE — forms surfaced by the spec audit (nested paths, write order
+    # semantics, location, CREATE ... LIKE, Spark-only transform aliases)
+    # =====================================================================
+    CorpusEntry(
+        "ct_struct_field_not_null_comment",
+        "create_table_nested",
+        "CREATE TABLE foo.t (s STRUCT<x: DOUBLE NOT NULL COMMENT 'xx', y: INT>) USING iceberg",
+        "apply",
+        "Struct field nullability and comment are part of the Spark struct type.",
+    ),
+    CorpusEntry(
+        "ct_char_varchar_small_ints",
+        "create_table",
+        "CREATE TABLE foo.t (a CHAR(3), b VARCHAR(10), c SMALLINT, d TINYINT) USING iceberg",
+        "apply",
+        "Spark-to-Iceberg type conversion: char/varchar -> string, byte/short -> int.",
+    ),
+    CorpusEntry(
+        "ct_part_date",
+        "create_table_partition",
+        "CREATE TABLE foo.t (ts TIMESTAMP) USING iceberg PARTITIONED BY (date(ts))",
+        "apply",
+        f"{_DDL}; date(ts) is the documented alias of day(ts).",
+    ),
+    CorpusEntry(
+        "ct_part_date_hour",
+        "create_table_partition",
+        "CREATE TABLE foo.t (ts TIMESTAMP) USING iceberg PARTITIONED BY (date_hour(ts))",
+        "apply",
+        f"{_DDL}; date_hour(ts) is the documented alias of hour(ts).",
+    ),
+    CorpusEntry(
+        "ct_part_nested",
+        "create_table_partition",
+        "CREATE TABLE foo.t (p STRUCT<x: INT>) USING iceberg PARTITIONED BY (bucket(4, p.x))",
+        "apply",
+        "Spec: partition sources may be nested in a struct.",
+    ),
+    CorpusEntry(
+        "ct_like",
+        "create_table",
+        "CREATE TABLE foo.t2 LIKE foo.t",
+        "apply",
+        f"{_DDL}; Spark 4.2 copies schema, partitioning, sort order and properties.",
+    ),
+    CorpusEntry(
+        "add_column_nested_first",
+        "schema_add",
+        "ALTER TABLE foo.t ADD COLUMN point.v DOUBLE FIRST",
+        "apply",
+        f"{_DDL}; nested add with position.",
+    ),
+    CorpusEntry(
+        "add_column_list_element",
+        "schema_add",
+        "ALTER TABLE foo.t ADD COLUMN pts.element.z DOUBLE",
+        "apply",
+        f"{_DDL}; 'element' addresses a list's element struct.",
+    ),
+    CorpusEntry(
+        "add_column_map_value",
+        "schema_add",
+        "ALTER TABLE foo.t ADD COLUMN m.value.b INT",
+        "apply",
+        f"{_DDL}; 'value' addresses a map's value struct.",
+    ),
+    CorpusEntry(
+        "alter_column_nested_comment",
+        "schema_alter",
+        "ALTER TABLE foo.t ALTER COLUMN point.x COMMENT 'xx'",
+        "apply",
+        "Comment on a struct field.",
+    ),
+    CorpusEntry(
+        "alter_column_nested_type",
+        "schema_alter",
+        "ALTER TABLE foo.t ALTER COLUMN m.value.a TYPE BIGINT",
+        "apply",
+        "Widen a field inside a map value struct.",
+    ),
+    CorpusEntry(
+        "alter_column_nested_after",
+        "schema_alter",
+        "ALTER TABLE foo.t ALTER COLUMN point.z AFTER x",
+        "apply",
+        f"{_DDL}; reorder within a struct.",
+    ),
+    CorpusEntry(
+        "apf_nested",
+        "partition_evolution",
+        "ALTER TABLE foo.t ADD PARTITION FIELD bucket(4, location.zone)",
+        "apply",
+        "Spec: partition sources may be nested in a struct.",
+    ),
+    CorpusEntry(
+        "wob_transform_days",
+        "sort_order",
+        "ALTER TABLE foo.t WRITE ORDERED BY days(ts) DESC, bucket(16, id)",
+        "apply",
+        "Sort fields take partition transforms (spec: Sorting).",
+    ),
+    CorpusEntry(
+        "set_location",
+        "table_properties",
+        "ALTER TABLE foo.t SET LOCATION 's3://bucket/moved'",
+        "apply",
+        "Spark ALTER TABLE ... SET LOCATION; REST SetLocationUpdate.",
+    ),
+    CorpusEntry(
+        "set_comment_property",
+        "table_properties",
+        "ALTER TABLE foo.t SET TBLPROPERTIES ('comment' = 'A table comment.')",
+        "apply",
+        f"{_DDL}; the table comment is the 'comment' property.",
+    ),
+    CorpusEntry(
+        "ns_create_comment",
+        "namespace",
+        "CREATE NAMESPACE foo COMMENT 'docs' WITH DBPROPERTIES ('owner' = 'eng')",
+        "apply",
+        "Spark CREATE NAMESPACE clauses; comment is stored as the 'comment' property.",
+    ),
+    # =====================================================================
+    # Iceberg format v3 DDL
+    # =====================================================================
+    CorpusEntry(
+        "ct_time",
+        "create_table",
+        "CREATE TABLE foo.t (t TIME) USING iceberg",
+        "apply",
+        "Spark 4.1 TIME -> Iceberg time.",
+    ),
+    CorpusEntry(
+        "ct_v3_geo_types",
+        "create_table_v3",
+        "CREATE TABLE foo.t (g GEOMETRY, g2 GEOMETRY(4326), gg GEOGRAPHY, "
+        "gg2 GEOGRAPHY('OGC:CRS84', 'vincenty')) USING iceberg "
+        "TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "Spec v3 geometry(C) / geography(C, A).",
+    ),
+    CorpusEntry(
+        "ct_v3_partitioned",
+        "create_table_v3",
+        "CREATE TABLE foo.t (id BIGINT, ts TIMESTAMP) USING iceberg "
+        "PARTITIONED BY (bucket(8, id), days(ts)) TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "Partitioned v3 table created in a single request.",
+    ),
+    CorpusEntry(
+        "ct_v3_geo_on_v2",
+        "create_table_v3",
+        "CREATE TABLE foo.t (g GEOMETRY) USING iceberg",
+        "invalid",
+        "geometry is a v3 type; a v2 table can't hold it.",
+    ),
+    CorpusEntry(
+        "ct_v3_default",
+        "create_table_v3",
+        "CREATE TABLE foo.t (id BIGINT, status STRING DEFAULT 'new') USING iceberg "
+        "TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "Spec v3 default values; a create-time DEFAULT is the write-default.",
+    ),
+    CorpusEntry(
+        "ct_default_on_v2",
+        "create_table_v3",
+        "CREATE TABLE foo.t (id BIGINT DEFAULT 0) USING iceberg",
+        "invalid",
+        "Default values are a v3 feature.",
+    ),
+    CorpusEntry(
+        "ct_variant",
+        "create_table_v3",
+        "CREATE TABLE foo.t (v VARIANT) USING iceberg TBLPROPERTIES ('format-version' = '3')",
+        "reject",
+        "Spec v3 variant; PyIceberg has no variant type yet, so saltation refuses it.",
+    ),
+    CorpusEntry(
+        "upgrade_format_v3",
+        "table_properties_v3",
+        "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '3')",
+        "apply",
+        "format-version is reserved; maps to the REST upgrade-format-version update.",
+    ),
+    CorpusEntry(
+        "downgrade_format",
+        "table_properties_v3",
+        "ALTER TABLE foo.t SET TBLPROPERTIES ('format-version' = '2')",
+        "invalid",
+        "The spec only allows format upgrades.",
+    ),
+    CorpusEntry(
+        "add_column_default_v3",
+        "schema_add_v3",
+        "ALTER TABLE foo.t ADD COLUMN c INT DEFAULT 5",
+        "apply",
+        "Spec v3: initial-default and write-default both set on add.",
+    ),
+    CorpusEntry(
+        "add_column_not_null_default_v3",
+        "schema_add_v3",
+        "ALTER TABLE foo.t ADD COLUMN c INT NOT NULL DEFAULT 5",
+        "apply",
+        "A required column can be added once a default fills existing rows.",
+    ),
+    CorpusEntry(
+        "add_column_geometry_v3",
+        "schema_add_v3",
+        "ALTER TABLE foo.t ADD COLUMN g GEOMETRY",
+        "apply",
+        "Spec v3 geometry added to an upgraded table.",
+    ),
+    CorpusEntry(
+        "alter_column_set_default",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN c SET DEFAULT 7",
+        "apply",
+        "Changes the write-default only.",
+    ),
+    CorpusEntry(
+        "alter_column_drop_default",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN c DROP DEFAULT",
+        "apply",
+        "Clears the write-default.",
+    ),
+    CorpusEntry(
+        "promote_date_to_timestamp",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN d TYPE TIMESTAMP_NTZ",
+        "apply",
+        "Spec v3 type promotion date -> timestamp.",
+    ),
+    CorpusEntry(
+        "promote_date_bucketed",
+        "schema_alter_v3",
+        "ALTER TABLE foo.t ALTER COLUMN d TYPE TIMESTAMP_NTZ",
+        "invalid",
+        "Spec: promotion is refused when a partition transform (bucket) would change values.",
+    ),
+    # =====================================================================
+    # Iceberg views (REST catalog)
+    # =====================================================================
+    CorpusEntry(
+        "view_create",
+        "view",
+        "CREATE VIEW foo.v AS SELECT id, name FROM foo.t",
+        "apply",
+        "Iceberg view on the REST catalog; schema inferred from foo.t.",
+    ),
+    CorpusEntry(
+        "view_create_existing",
+        "view",
+        "CREATE VIEW foo.v AS SELECT name FROM foo.t",
+        "apply",
+        "Plain CREATE leaves an existing view alone, as for tables.",
+    ),
+    CorpusEntry(
+        "view_create_if_not_exists",
+        "view",
+        "CREATE VIEW IF NOT EXISTS foo.v AS SELECT name FROM foo.t",
+        "apply",
+        "IF NOT EXISTS on an existing view is a no-op.",
+    ),
+    CorpusEntry(
+        "view_create_or_replace",
+        "view",
+        "CREATE OR REPLACE VIEW foo.v AS SELECT id, name FROM foo.t",
+        "apply",
+        "Adds a view version only when SQL/schema/properties change.",
+    ),
+    CorpusEntry(
+        "view_column_list",
+        "view",
+        "CREATE VIEW foo.v (ident COMMENT 'the id', nm) COMMENT 'docs' "
+        "TBLPROPERTIES ('k' = 'v') AS SELECT id, name FROM foo.t",
+        "apply",
+        "Spark view column list renames/comments output columns.",
+    ),
+    CorpusEntry(
+        "view_unqualified_source",
+        "view",
+        "CREATE VIEW foo.v AS SELECT id FROM t",
+        "apply",
+        "Unqualified sources resolve against the view's default namespace.",
+    ),
+    CorpusEntry(
+        "view_cast_external",
+        "view",
+        "CREATE VIEW foo.v AS SELECT CAST(key AS STRING) AS k FROM ext.topic",
+        "apply",
+        "Columns from outside the catalog are typed by CAST.",
+    ),
+    CorpusEntry(
+        "view_untyped_external",
+        "view",
+        "CREATE VIEW foo.v AS SELECT key FROM ext.topic",
+        "invalid",
+        "A column with no inferable type can't go in the view schema.",
+    ),
+    CorpusEntry(
+        "view_select_star",
+        "view",
+        "CREATE VIEW foo.v AS SELECT * FROM foo.t",
+        "apply",
+        "The view schema lists the expanded columns, not a column named *.",
+    ),
+    CorpusEntry(
+        "view_qualified_star",
+        "view",
+        "CREATE VIEW foo.v AS SELECT t.*, id AS again FROM foo.t AS t",
+        "apply",
+        "t.* expands too, alongside other projections.",
+    ),
+    CorpusEntry(
+        "view_unnamed_expression",
+        "view",
+        "CREATE VIEW foo.v AS SELECT id + 1 FROM foo.t",
+        "invalid",
+        "An expression with no alias has no column name to store.",
+    ),
+    CorpusEntry(
+        "view_decimal_arithmetic",
+        "view",
+        "CREATE VIEW foo.v AS SELECT SUM(amt) AS total FROM foo.d",
+        "invalid",
+        "Spark widens decimal arithmetic; the result type must be CAST or declared.",
+    ),
+    CorpusEntry(
+        "view_on_view",
+        "view",
+        "CREATE VIEW foo.v2 AS SELECT name FROM foo.v",
+        "apply",
+        "Views may read views; the source view's schema types the query.",
+    ),
+    CorpusEntry(
+        "drop_view",
+        "view",
+        "DROP VIEW foo.v",
+        "apply",
+        "Drops the view.",
+    ),
+    CorpusEntry(
+        "drop_view_if_exists",
+        "view",
+        "DROP VIEW IF EXISTS foo.v",
+        "apply",
+        "Drops the view; absent is a no-op.",
+    ),
+    CorpusEntry(
+        "alter_view_as",
+        "view",
+        "ALTER VIEW foo.v AS SELECT id, name FROM foo.t",
+        "apply",
+        "Spark ALTER VIEW ... AS: new version, properties kept.",
+    ),
+    CorpusEntry(
+        "alter_view_set_properties",
+        "view",
+        "ALTER VIEW foo.v SET TBLPROPERTIES ('k' = 'v')",
+        "apply",
+        "View properties.",
+    ),
+    CorpusEntry(
+        "alter_view_unset_properties",
+        "view",
+        "ALTER VIEW foo.v UNSET TBLPROPERTIES ('k')",
+        "apply",
+        "View properties.",
+    ),
+    CorpusEntry(
+        "alter_view_rename",
+        "view",
+        "ALTER VIEW foo.v RENAME TO foo.w",
+        "apply",
+        "REST views/rename.",
     ),
     # =====================================================================
     # NEGATIVE — out-of-scope writes
@@ -913,7 +1318,7 @@ CORPUS: list[CorpusEntry] = [
         "neg_time_travel",
         "SELECT * FROM foo.t FOR VERSION AS OF 123",
         "reject",
-        f"{_QUERIES}; time-travel read; cambrian applies DDL, not SELECT.",
+        f"{_QUERIES}; time-travel read; saltation applies DDL, not SELECT.",
     ),
     CorpusEntry(
         "neg_time_travel_timestamp",

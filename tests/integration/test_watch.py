@@ -1,4 +1,4 @@
-"""Integration tests for ``cambrian watch`` against Lakekeeper.
+"""Integration tests for ``saltation watch`` against Lakekeeper.
 
 The watch loop runs as an asyncio task in-process; we drive it by
 mutating files on disk and asserting against the catalog. ``awatch``'s
@@ -19,29 +19,18 @@ from anyio import Event
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceNotEmptyError, NoSuchNamespaceError
 
-from cambrian.config import CambrianConfig, CatalogConfig, DevConfig, EvolutionsConfig
-from cambrian.migrate.watch import WatchEvent, watch
+from saltation.config import DevConfig, EvolutionsConfig, SaltationConfig
+from saltation.migrate.watch import WatchEvent, watch
 
-LAKEKEEPER_URL = "http://localhost:8181"
-WAREHOUSE = "cambrian"
+from .rig import catalog_config
+from .rig import rest_catalog as rig_catalog
 
 
 def _build_config(
     *, evolutions_dir: Path, sidecar_namespace: str, debounce_ms: int
-) -> CambrianConfig:
-    return CambrianConfig(
-        catalog=CatalogConfig(
-            type="rest",
-            uri=f"{LAKEKEEPER_URL}/catalog",
-            **{
-                "warehouse": WAREHOUSE,
-                "s3.endpoint": "http://localhost:9000",
-                "s3.access-key-id": "cambrian-access-key",
-                "s3.secret-access-key": "cambrian-secret-key",
-                "s3.region": "local",
-                "s3.path-style-access": "true",
-            },
-        ),
+) -> SaltationConfig:
+    return SaltationConfig(
+        catalog=catalog_config(),
         evolutions=EvolutionsConfig(
             dir=str(evolutions_dir),
             sidecar_namespace=sidecar_namespace,
@@ -52,7 +41,7 @@ def _build_config(
 
 @pytest.fixture
 def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
-    namespace = f"_cambrian_test_{uuid.uuid4().hex[:8]}"
+    namespace = f"_saltation_test_{uuid.uuid4().hex[:8]}"
     yield namespace
     try:
         for ident in rest_catalog.list_tables(namespace):
@@ -63,7 +52,7 @@ def sidecar_ns(rest_catalog: RestCatalog) -> Iterator[str]:
 
 
 async def _drive_watch(
-    cfg: CambrianConfig,
+    cfg: SaltationConfig,
     *,
     actions: list,  # list of async callables to run between event observations
     expected_apply_events: int,
@@ -81,8 +70,12 @@ async def _drive_watch(
     saw_apply = asyncio.Event()
     applies_remaining = {"n": expected_apply_events}
 
+    started = asyncio.Event()
+
     async def _on_event(event: WatchEvent) -> None:
         events.append(event)
+        if event.kind == "startup":
+            started.set()
         # Count any post-startup event tied to a real filesystem change,
         # including errors — the test cases assert on whichever outcomes
         # they expect.
@@ -105,6 +98,9 @@ async def _drive_watch(
     # Run actions in order, with a brief settle delay between each so the
     # filesystem-event pipeline can fire.
     try:
+        # Edits made before the watcher starts watching (it first runs the
+        # initial apply) are never seen; wait for its startup event.
+        await asyncio.wait_for(started.wait(), timeout=timeout_s)
         for act in actions:
             await act()
         await asyncio.wait_for(saw_apply.wait(), timeout=timeout_s)
@@ -150,20 +146,8 @@ def test_watch_picks_up_edit(
     assert kinds[-1] in {"applied", "unchanged", "partial"}, kinds
 
     # The second table now exists.
-    from pyiceberg.catalog.rest import RestCatalog as _RC
 
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     assert catalog.table_exists((ns, "t"))
     assert catalog.table_exists((ns, "u"))
 
@@ -209,20 +193,7 @@ def test_watch_debounce_coalesces_rapid_edits(
     ]
     assert len(applies_with_changes) == 1, [(e.kind, e.paths_changed) for e in events]
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     assert catalog.table_exists((ns, "t0"))
     assert catalog.table_exists((ns, "t1"))
     assert catalog.table_exists((ns, "t2"))
@@ -265,18 +236,5 @@ def test_watch_parse_error_does_not_crash(
     assert "error" in kinds, kinds
     assert "applied" in kinds, kinds
 
-    from pyiceberg.catalog.rest import RestCatalog as _RC
-
-    catalog = _RC(
-        name="verify",
-        **{
-            "uri": f"{LAKEKEEPER_URL}/catalog",
-            "warehouse": WAREHOUSE,
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "cambrian-access-key",
-            "s3.secret-access-key": "cambrian-secret-key",
-            "s3.region": "local",
-            "s3.path-style-access": "true",
-        },
-    )
+    catalog = rig_catalog("verify")
     assert catalog.table_exists((ns, "fixed"))

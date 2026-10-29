@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from cambrian.errors import (
-    CambrianError,
+from saltation.errors import (
     NotInitializedError,
+    SaltationError,
     SidecarVersionAheadError,
 )
 
 
 def test_not_initialized_default_message_mentions_init() -> None:
     err = NotInitializedError()
-    assert isinstance(err, CambrianError)
-    assert "cambrian init" in str(err)
+    assert isinstance(err, SaltationError)
+    assert "saltation init" in str(err)
 
 
 def test_not_initialized_custom_message_overrides_default() -> None:
@@ -24,13 +24,13 @@ def test_not_initialized_custom_message_overrides_default() -> None:
 
 def test_version_ahead_carries_versions_and_friendly_message() -> None:
     err = SidecarVersionAheadError(found_version=5, expected_version=2)
-    assert isinstance(err, CambrianError)
+    assert isinstance(err, SaltationError)
     assert err.found_version == 5
     assert err.expected_version == 2
     msg = str(err)
     assert "5" in msg
     assert "2" in msg
-    assert "upgrade cambrian" in msg.lower()
+    assert "upgrade saltation" in msg.lower()
 
 
 def test_errors_are_raisable() -> None:
@@ -38,5 +38,5 @@ def test_errors_are_raisable() -> None:
         raise NotInitializedError()
     with pytest.raises(SidecarVersionAheadError):
         raise SidecarVersionAheadError(1, 0)
-    with pytest.raises(CambrianError):
+    with pytest.raises(SaltationError):
         raise NotInitializedError()

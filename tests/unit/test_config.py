@@ -1,4 +1,4 @@
-"""Unit tests for ``cambrian.config``."""
+"""Unit tests for ``saltation.config``."""
 
 from __future__ import annotations
 
@@ -6,21 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from cambrian.config import (
-    CambrianConfig,
+from saltation.config import (
     DevConfig,
     EvolutionsConfig,
+    SaltationConfig,
     load_config,
     redacted_dump,
 )
-from cambrian.errors import (
+from saltation.errors import (
     ConfigNotFoundError,
     InvalidConfigError,
     MissingEnvVarError,
 )
 
 
-def _write(tmp_path: Path, contents: str, name: str = "cambrian.toml") -> Path:
+def _write(tmp_path: Path, contents: str, name: str = "saltation.toml") -> Path:
     path = tmp_path / name
     path.write_text(contents)
     return path
@@ -51,7 +51,7 @@ debounce_ms = 1000
 """,
     )
     cfg = load_config(path)
-    assert isinstance(cfg, CambrianConfig)
+    assert isinstance(cfg, SaltationConfig)
     assert cfg.catalog.type == "rest"
     assert cfg.catalog.uri == "http://localhost:8181"
     assert cfg.evolutions.dir == "./my-evos"
@@ -75,7 +75,7 @@ uri = "http://localhost:8181"
     # Evolutions defaults
     assert cfg.evolutions == EvolutionsConfig()
     assert cfg.evolutions.dir == "./evolutions"
-    assert cfg.evolutions.sidecar_namespace == "_cambrian"
+    assert cfg.evolutions.sidecar_namespace == "_saltation"
     assert cfg.evolutions.sidecar_catalog is None
     # Dev defaults
     assert cfg.dev == DevConfig()
@@ -100,7 +100,7 @@ dir = "./scripts"
     cfg = load_config(path)
     assert cfg.evolutions.dir == "./scripts"
     # Defaults preserved
-    assert cfg.evolutions.sidecar_namespace == "_cambrian"
+    assert cfg.evolutions.sidecar_namespace == "_saltation"
 
 
 def test_sidecar_table_removed_from_schema(tmp_path: Path) -> None:
@@ -236,15 +236,15 @@ token = "abc"
 
 
 def test_env_interpolation_substitutes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CAMBRIAN_CATALOG_URI", "http://from-env:9000")
-    monkeypatch.setenv("CAMBRIAN_TOKEN", "shh")
+    monkeypatch.setenv("SALTATION_CATALOG_URI", "http://from-env:9000")
+    monkeypatch.setenv("SALTATION_TOKEN", "shh")
     path = _write(
         tmp_path,
         """
 [catalog]
 type = "rest"
-uri = "${CAMBRIAN_CATALOG_URI}"
-token = "prefix-${CAMBRIAN_TOKEN}-suffix"
+uri = "${SALTATION_CATALOG_URI}"
+token = "prefix-${SALTATION_TOKEN}-suffix"
 """,
     )
     cfg = load_config(path)
@@ -255,68 +255,68 @@ token = "prefix-${CAMBRIAN_TOKEN}-suffix"
 def test_env_interpolation_missing_raises_listing_all_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("CAMBRIAN_MISSING_A", raising=False)
-    monkeypatch.delenv("CAMBRIAN_MISSING_B", raising=False)
+    monkeypatch.delenv("SALTATION_MISSING_A", raising=False)
+    monkeypatch.delenv("SALTATION_MISSING_B", raising=False)
     path = _write(
         tmp_path,
         """
 [catalog]
 type = "rest"
-uri = "${CAMBRIAN_MISSING_A}"
-token = "${CAMBRIAN_MISSING_B}"
+uri = "${SALTATION_MISSING_A}"
+token = "${SALTATION_MISSING_B}"
 """,
     )
     with pytest.raises(MissingEnvVarError) as excinfo:
         load_config(path)
     message = str(excinfo.value)
-    assert "CAMBRIAN_MISSING_A" in message
-    assert "CAMBRIAN_MISSING_B" in message
+    assert "SALTATION_MISSING_A" in message
+    assert "SALTATION_MISSING_B" in message
 
 
 def test_env_interpolation_missing_var_names_field(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The error message must name BOTH the unset var and the field it was used in."""
-    monkeypatch.delenv("CAMBRIAN_CATALOG_TOKEN", raising=False)
+    monkeypatch.delenv("SALTATION_CATALOG_TOKEN", raising=False)
     path = _write(
         tmp_path,
         """
 [catalog]
 type = "rest"
 uri = "http://localhost:8181"
-token = "${CAMBRIAN_CATALOG_TOKEN}"
+token = "${SALTATION_CATALOG_TOKEN}"
 """,
     )
     with pytest.raises(MissingEnvVarError) as excinfo:
         load_config(path)
     message = str(excinfo.value)
-    assert "CAMBRIAN_CATALOG_TOKEN" in message
+    assert "SALTATION_CATALOG_TOKEN" in message
     assert "catalog.token" in message
 
 
 def test_env_interpolation_literal_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``$${VAR}`` is rewritten to the literal ``${VAR}`` without interpolation."""
-    monkeypatch.delenv("CAMBRIAN_NOT_SET", raising=False)
-    monkeypatch.setenv("CAMBRIAN_TOKEN", "real")
+    monkeypatch.delenv("SALTATION_NOT_SET", raising=False)
+    monkeypatch.setenv("SALTATION_TOKEN", "real")
     path = _write(
         tmp_path,
         """
 [catalog]
 type = "rest"
 uri = "http://localhost:8181"
-warehouse = "literal-$${CAMBRIAN_NOT_SET}-tail"
-token = "${CAMBRIAN_TOKEN}"
+warehouse = "literal-$${SALTATION_NOT_SET}-tail"
+token = "${SALTATION_TOKEN}"
 """,
     )
     cfg = load_config(path)
     dumped = cfg.catalog.model_dump()
-    assert dumped["warehouse"] == "literal-${CAMBRIAN_NOT_SET}-tail"
+    assert dumped["warehouse"] == "literal-${SALTATION_NOT_SET}-tail"
     assert dumped["token"] == "real"
 
 
 def test_env_interpolation_only_strings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-string TOML scalars are passed through untouched."""
-    monkeypatch.setenv("CAMBRIAN_DIR", "./from-env-dir")
+    monkeypatch.setenv("SALTATION_DIR", "./from-env-dir")
     path = _write(
         tmp_path,
         """
@@ -325,7 +325,7 @@ type = "rest"
 uri = "http://localhost:8181"
 
 [evolutions]
-dir = "${CAMBRIAN_DIR}"
+dir = "${SALTATION_DIR}"
 
 [dev]
 debounce_ms = 250
