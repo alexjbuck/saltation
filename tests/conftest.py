@@ -1,6 +1,7 @@
 """Hypothesis profiles shared by unit and integration property tests.
 
-Select with ``HYPOTHESIS_PROFILE`` (``dev`` default, ``ci``, ``nightly``).
+Select with ``HYPOTHESIS_PROFILE`` (``dev`` default, ``ci``, ``nightly``, ``fuzz``).
+``fuzz`` is the weekly fuzz workflow; ``HYPOTHESIS_MAX_EXAMPLES`` sets its budget.
 Integration properties pay several catalog round-trips per example, so the
 example budgets are deliberately modest outside ``nightly``.
 """
@@ -19,5 +20,12 @@ settings.register_profile(
 )
 settings.register_profile(
     "nightly", max_examples=400, deadline=None, suppress_health_check=_SLOW, print_blob=True
+)
+settings.register_profile(
+    "fuzz",
+    max_examples=int(os.environ.get("HYPOTHESIS_MAX_EXAMPLES", "2000")),
+    deadline=None,
+    suppress_health_check=_SLOW,
+    print_blob=True,
 )
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))

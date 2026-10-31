@@ -1,0 +1,1166 @@
+# serializer version: 1
+# name: test_exit_codes
+  dict({
+    'EXIT_ERROR (implicit)': 1,
+    'EXIT_EXTERNAL_WRITE': 4,
+    'EXIT_NOT_INITIALIZED': 2,
+    'EXIT_SUCCESS (implicit)': 0,
+    'EXIT_VERSION_AHEAD': 3,
+  })
+# ---
+# name: test_help[saltation apply]
+  '''
+  
+   Usage: saltation apply [OPTIONS]
+  
+   Apply ``current.sql`` against the configured catalog.
+  
+   Idempotent mode is the default. Reset mode (``--reset`` or
+   ``.mode = "reset"``) is the opt-in escape hatch for evolutions
+   that genuinely cannot be expressed idempotently: it rolls the affected
+   tables back to their last checkpoint, then re-applies. Idempotent is
+   the path; reset is the relief valve.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path           -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                          │
+  │ --allow-partial                Continue past statement failures and emit a partial-success event. Without this flag, │
+  │                                the first failure surfaces immediately.                                               │
+  │ --reset                        Run in reset mode: roll the affected tables back to their last checkpoint, then       │
+  │                                re-apply. Use ONLY for evolutions that genuinely cannot be expressed idempotently —   │
+  │                                idempotent is the default and the safety contract.                                    │
+  │ --force                        Override external-write detection when using --reset. Required only if another writer │
+  │                                has advanced one of the affected tables since the last saltation apply; using this    │
+  │                                risks clobbering their work.                                                          │
+  │ --json                         Emit machine-readable JSON instead of the human view.                                 │
+  │ --help                         Show this message and exit.                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation commit]
+  '''
+  
+   Usage: saltation commit [OPTIONS]
+  
+   Freeze ``current.sql`` as a committed evolution.
+  
+   Preconditions: ``current.sql`` is non-empty and applies cleanly (run
+   ``saltation apply`` first). The current text is moved to
+   ``committed/<NNNN>_<slug>.sql``, the affected tables get a checkpoint
+   pinned at the ``saltation.committed.<n>.<slug>`` tag, and ``current.sql``
+   is truncated for the next dev iteration.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ *  --message  -m      TEXT  Short description of the committed evolution (becomes the file slug). [required]         │
+  │    --path     -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                             │
+  │    --json                   Emit machine-readable JSON output.                                                       │
+  │    --help                   Show this message and exit.                                                              │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation config check]
+  '''
+  
+   Usage: saltation config check [OPTIONS]
+  
+   Validate the config file. Exits 0 on success, non-zero with a message on failure.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path  -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                   │
+  │ --help                Show this message and exit.                                                                    │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation config show]
+  '''
+  
+   Usage: saltation config show [OPTIONS]
+  
+   Print the (redacted) effective config.
+  
+   Credential-shaped values (token, secret, password, credential, *_key
+   patterns) are replaced with ``"***"``. See ``saltation.config.redacted_dump``
+   for the heuristic.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path  -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                   │
+  │ --json                Emit machine-readable JSON instead of the human view.                                          │
+  │ --help                Show this message and exit.                                                                    │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation config]
+  '''
+  
+   Usage: saltation config [OPTIONS] COMMAND [ARGS]...
+  
+   Inspect and validate the saltation config file.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --help          Show this message and exit.                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ show   Print the (redacted) effective config.                                                                        │
+  │ check  Validate the config file. Exits 0 on success, non-zero with a message on failure.                             │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation download]
+  '''
+  
+   Usage: saltation download [OPTIONS]
+  
+   Alias for ``saltation sync``. Same semantics; chosen for muscle memory.
+  
+   Postgres-land tools tend to spell this ``download`` (sqitch) or ``sync``
+   (graphile-migrate); we accept both. The catalog is the source of truth
+   and both commands rehydrate the local ``committed/`` directory from it.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path     -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                │
+  │ --dry-run                Plan only; write nothing to disk.                                                           │
+  │ --diff                   Print a unified diff of local vs catalog on conflicts.                                      │
+  │ --force                  Overwrite local committed files on conflict.                                                │
+  │ --json                   Emit a single-line JSON summary.                                                            │
+  │ --help                   Show this message and exit.                                                                 │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation init]
+  '''
+  
+   Usage: saltation init [OPTIONS]
+  
+   Bootstrap the ``_saltation`` sidecar in the configured catalog.
+  
+   Idempotent: re-running on an already-initialised catalog is a no-op.
+   Fails if the sidecar is at a *newer* version than this binary knows.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path  -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                   │
+  │ --help                Show this message and exit.                                                                    │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation redo]
+  '''
+  
+   Usage: saltation redo [OPTIONS]
+  
+   Alias for ``saltation apply --reset``.
+  
+   Same semantics, shorter to type during a non-idempotent-evolution
+   dev loop. Reset is the relief valve — prefer idempotent SQL.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path           -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                          │
+  │ --allow-partial                Continue past statement failures.                                                     │
+  │ --force                        Override external-write detection. See `saltation apply --reset --help`.              │
+  │ --json                         Emit machine-readable JSON output.                                                    │
+  │ --help                         Show this message and exit.                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation reset-to]
+  '''
+  
+   Usage: saltation reset-to [OPTIONS] EVOLUTION_ID
+  
+   Roll affected tables back to a committed evolution's checkpoint. INCIDENT RESPONSE ONLY — does not delete committed
+   files, does not touch downstream commit events. Reset is the relief valve, never the recommended fix; reach for
+   idempotent SQL first.
+  
+  ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ *    evolution_id      TEXT  The committed evolution id to roll back to, e.g. '0007_add_users'. See `saltation       │
+  │                              status` for the live set.                                                               │
+  │                              [required]                                                                              │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path  -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                   │
+  │ --json                Emit machine-readable JSON output.                                                             │
+  │ --help                Show this message and exit.                                                                    │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation rollback]
+  '''
+  
+   Usage: saltation rollback [OPTIONS]
+  
+   Roll the affected tables of the last apply back to their checkpoint, without re-applying.
+  
+   Useful when you want to discard a dev iteration's table mutations
+   entirely and edit ``current.sql`` from scratch. Does not re-execute
+   SQL afterwards — the next ``saltation apply`` re-applies the (possibly
+   edited) ``current.sql``.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path  -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                   │
+  │ --json                Emit machine-readable JSON output.                                                             │
+  │ --help                Show this message and exit.                                                                    │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation status]
+  '''
+  
+   Usage: saltation status [OPTIONS]
+  
+   Report sidecar version, committed evolutions, and the current in-flight apply.
+  
+   Read-only: tolerates a sidecar that is one or more versions ahead of
+   this binary (prints a warning). Exits ``2`` if the sidecar has never
+   been initialised in this catalog.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path  -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                   │
+  │ --json                Emit machine-readable JSON instead of the human view.                                          │
+  │ --help                Show this message and exit.                                                                    │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation sync]
+  '''
+  
+   Usage: saltation sync [OPTIONS]
+  
+   Rehydrate the local ``committed/`` directory from the catalog.
+  
+   Read-only against the catalog: no events are written. Missing files are
+   created, hash-matching files are skipped, and files whose content differs
+   from the catalog row are refused unless ``--force`` is passed. Use
+   ``--diff`` to inspect conflicts; use ``--dry-run`` to plan without
+   touching the filesystem. Exits ``4`` if any conflict was refused so CI
+   can fail loud on a drifted checkout.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path     -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                │
+  │ --dry-run                Plan only; write nothing to disk.                                                           │
+  │ --diff                   Print a unified diff of local vs catalog on conflicts. Implies --dry-run unless --force is  │
+  │                          also passed.                                                                                │
+  │ --force                  Overwrite local committed files that conflict with the catalog.                             │
+  │ --json                   Emit a single-line JSON summary.                                                            │
+  │ --help                   Show this message and exit.                                                                 │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation uncommit]
+  '''
+  
+   Usage: saltation uncommit [OPTIONS]
+  
+   Pop the latest committed evolution back into ``current.sql``.
+  
+   Rolls the affected tables back to the checkpoint pinned at commit time
+   and deletes the committed file. Refuses if downstream committed files
+   exist (a gap in numbering would be a corruption) or if ``current.sql``
+   is non-empty without ``--force``.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path   -p      PATH  Path to the saltation config TOML. [default: saltation.toml]                                  │
+  │ --force                Overwrite a non-empty current.sql with the uncommitted content. Without --force, uncommit     │
+  │                        refuses to clobber unsaved work.                                                              │
+  │ --json                 Emit machine-readable JSON output.                                                            │
+  │ --help                 Show this message and exit.                                                                   │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation watch]
+  '''
+  
+   Usage: saltation watch [OPTIONS]
+  
+   Watch the evolutions directory and re-apply ``current.sql`` on every change.
+  
+   Default mode is idempotent — the safety contract. ``--reset`` (or
+   ``.mode = "reset"``) enables the rollback-before-reapply path
+   for non-idempotent evolutions. Use it sparingly. A parse or dispatch
+   error during a re-apply is reported and the loop keeps watching.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --path           -p      PATH     Path to the saltation config TOML. [default: saltation.toml]                       │
+  │ --debounce-ms            INTEGER  Override ``.debounce_ms`` for this invocation. Milliseconds of quiet time required │
+  │                                   before a batch of edits triggers an apply.                                         │
+  │ --allow-partial                   Continue past statement failures and emit a partial-success event.                 │
+  │ --reset                           Run each re-apply in reset mode. Use ONLY for evolutions that genuinely cannot be  │
+  │                                   expressed idempotently. Honours ``.mode = "reset"`` from saltation.toml as well.   │
+  │ --force                           Override external-write detection in reset mode. See `saltation apply --help`.     │
+  │ --json                            Emit one JSON line per watch event.                                                │
+  │ --help                            Show this message and exit.                                                        │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_help[saltation]
+  '''
+  
+   Usage: saltation [OPTIONS] COMMAND [ARGS]...
+  
+   SQL-driven evolution runner for Apache Iceberg tables.
+  
+  ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ --version          Show the saltation version and exit.                                                              │
+  │ --help             Show this message and exit.                                                                       │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ init      Bootstrap the ``_saltation`` sidecar in the configured catalog.                                            │
+  │ status    Report sidecar version, committed evolutions, and the current in-flight apply.                             │
+  │ apply     Apply ``current.sql`` against the configured catalog.                                                      │
+  │ redo      Alias for ``saltation apply --reset``.                                                                     │
+  │ rollback  Roll the affected tables of the last apply back to their checkpoint, without re-applying.                  │
+  │ commit    Freeze ``current.sql`` as a committed evolution.                                                           │
+  │ uncommit  Pop the latest committed evolution back into ``current.sql``.                                              │
+  │ reset-to  Roll affected tables back to a committed evolution's checkpoint. INCIDENT RESPONSE ONLY — does not delete  │
+  │           committed files, does not touch downstream commit events. Reset is the relief valve, never the recommended │
+  │           fix; reach for idempotent SQL first.                                                                       │
+  │ watch     Watch the evolutions directory and re-apply ``current.sql`` on every change.                               │
+  │ sync      Rehydrate the local ``committed/`` directory from the catalog.                                             │
+  │ download  Alias for ``saltation sync``. Same semantics; chosen for muscle memory.                                    │
+  │ config    Inspect and validate the saltation config file.                                                            │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  
+  '''
+# ---
+# name: test_json_payload_keys
+  dict({
+    'apply': dict({
+      'applied_committed': list([
+        dict({
+          'error': '<value>',
+          'event_id': '<value>',
+          'evolution_hash': '<value>',
+          'evolution_id': '<value>',
+          'status': '<value>',
+        }),
+      ]),
+      'error': '<value>',
+      'event_id': '<value>',
+      'evolution_hash': '<value>',
+      'evolution_id': '<value>',
+      'mode': 'idempotent',
+      'sources': list([
+        '<value>',
+      ]),
+      'statements': list([
+        dict({
+          'affected_tables': list([
+            '<value>',
+          ]),
+          'error': '<value>',
+          'notes': '<value>',
+          'sql': '<value>',
+        }),
+      ]),
+      'status': '<value>',
+    }),
+    'apply --reset / redo / rollback': dict({
+      'apply_event_id': '<value>',
+      'apply_result': dict({
+        'applied_committed': list([
+          dict({
+            'error': '<value>',
+            'event_id': '<value>',
+            'evolution_hash': '<value>',
+            'evolution_id': '<value>',
+            'status': '<value>',
+          }),
+        ]),
+        'error': '<value>',
+        'event_id': '<value>',
+        'evolution_hash': '<value>',
+        'evolution_id': '<value>',
+        'mode': 'idempotent',
+        'sources': list([
+          '<value>',
+        ]),
+        'statements': list([
+          dict({
+            'affected_tables': list([
+              '<value>',
+            ]),
+            'error': '<value>',
+            'notes': '<value>',
+            'sql': '<value>',
+          }),
+        ]),
+        'status': '<value>',
+      }),
+      'error': '<value>',
+      'evolution_hash': '<value>',
+      'mode': 'reset',
+      'rollback_event_id': '<value>',
+      'rollbacks': list([
+        dict({
+          'from_snapshot_id': '<value>',
+          'ident': '<value>',
+          'reason': '<value>',
+          'rolled_back': '<value>',
+          'to_snapshot_id': '<value>',
+        }),
+      ]),
+      'sources': list([
+        '<value>',
+      ]),
+      'status': '<value>',
+    }),
+    'commit': dict({
+      'affected_tables': '<value>',
+      'committed_path': '<value>',
+      'event_id': '<value>',
+      'evolution_hash': '<value>',
+      'evolution_id': '<value>',
+      'tag_ref': '<value>',
+    }),
+    'reset-to': dict({
+      'event_id': '<value>',
+      'evolution_id': '<value>',
+      'mode': 'reset --to',
+      'rolled_back_tables': '<value>',
+      'skipped_tables': '<value>',
+    }),
+    'status': dict({
+      'committed_count': '<value>',
+      'committed_evolutions': list([
+        dict({
+          'event_id': '<value>',
+          'event_ts': '<value>',
+          'evolution_id': '<value>',
+        }),
+      ]),
+      'current_applied': dict({
+        'event_id': '<value>',
+        'event_ts': '<value>',
+        'evolution_hash': '<value>',
+      }),
+      'initialized': True,
+      'is_version_ahead': '<value>',
+      'sidecar_namespace': '<value>',
+      'sidecar_version': '<value>',
+    }),
+    'sync / download': dict({
+      'discrepancies': '<value>',
+      'dry_run': '<value>',
+      'files': list([
+        dict({
+          'catalog_hash': '<value>',
+          'diff': '<value>',
+          'evolution_id': '<value>',
+          'local_hash': '<value>',
+          'note': '<value>',
+          'path': '<value>',
+          'status': '<value>',
+        }),
+      ]),
+      'overwritten': '<value>',
+      'refused': '<value>',
+      'skipped': '<value>',
+      'written': '<value>',
+    }),
+    'uncommit': dict({
+      'event_id': '<value>',
+      'evolution_id': '<value>',
+      'restored_path': '<value>',
+      'restored_to_current': True,
+      'rolled_back_tables': '<value>',
+      'skipped_tables': '<value>',
+    }),
+    'watch': dict({
+      'error': '<value>',
+      'event_id': '<value>',
+      'evolution_hash': '<value>',
+      'kind': '<value>',
+      'paths_changed': '<value>',
+      'sources': list([
+        '<value>',
+      ]),
+      'status': '<value>',
+    }),
+  })
+# ---
+# name: test_options_and_arguments
+  dict({
+    'saltation': list([
+      dict({
+        'decls': list([
+          '--version',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation apply': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--allow-partial',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--reset',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--force',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation commit': list([
+      dict({
+        'decls': list([
+          '--message',
+          '-m',
+        ]),
+        'default': 'None',
+        'flag': False,
+        'kind': 'option',
+        'required': True,
+      }),
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation config': list([
+    ]),
+    'saltation config check': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation config show': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation download': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--dry-run',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--diff',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--force',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation init': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation redo': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--allow-partial',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--force',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation reset-to': list([
+      dict({
+        'decls': list([
+          'evolution_id',
+        ]),
+        'default': 'None',
+        'flag': False,
+        'kind': 'argument',
+        'required': True,
+      }),
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation rollback': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation status': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation sync': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--dry-run',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--diff',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--force',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation uncommit': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--force',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+    'saltation watch': list([
+      dict({
+        'decls': list([
+          '--path',
+          '-p',
+        ]),
+        'default': 'saltation.toml',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--debounce-ms',
+        ]),
+        'default': 'None',
+        'flag': False,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--allow-partial',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--reset',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--force',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+      dict({
+        'decls': list([
+          '--json',
+        ]),
+        'default': 'False',
+        'flag': True,
+        'kind': 'option',
+        'required': False,
+      }),
+    ]),
+  })
+# ---
+# name: test_public_python_names
+  dict({
+    'saltation': list([
+      '__version__',
+      'catalog',
+      'cli',
+      'config',
+      'errors',
+      'iceberg',
+      'migrate',
+      'sidecar',
+      'sql',
+    ]),
+    'saltation.__main__': list([
+    ]),
+    'saltation.catalog': list([
+      'CATALOG_NAME',
+      'load_catalog',
+    ]),
+    'saltation.cli': list([
+      'EXIT_EXTERNAL_WRITE',
+      'EXIT_NOT_INITIALIZED',
+      'EXIT_VERSION_AHEAD',
+      'app',
+      'apply_command',
+      'commit_command',
+      'config_app',
+      'config_check',
+      'config_show',
+      'download_command',
+      'init_command',
+      'redo_command',
+      'reset_to_command',
+      'rollback_command',
+      'status_command',
+      'sync_command',
+      'uncommit_command',
+      'watch_command',
+    ]),
+    'saltation.config': list([
+      'CatalogConfig',
+      'DevConfig',
+      'EvolutionsConfig',
+      'SaltationConfig',
+      'load_config',
+      'redacted_dump',
+    ]),
+    'saltation.errors': list([
+      'CircularIncludeError',
+      'ConfigNotFoundError',
+      'DispatchError',
+      'EvolutionNotFoundError',
+      'ExternalWriteDetectedError',
+      'IllegalStateError',
+      'IncludeNotFoundError',
+      'InvalidConfigError',
+      'MissingEnvVarError',
+      'NotInitializedError',
+      'SaltationError',
+      'SidecarVersionAheadError',
+      'UnsupportedStatementError',
+    ]),
+    'saltation.iceberg': list([
+      'Checkpoint',
+      'TableIdent',
+      'affected',
+      'affected_tables',
+      'affected_tables_with_overrides',
+      'capture',
+      'checkpoint',
+      'pin',
+      'replace_schema',
+      'restore_pointers',
+      'set_location',
+      'txn',
+      'upgrade_format_version',
+      'views',
+    ]),
+    'saltation.iceberg.affected': list([
+      'OVERRIDE_RE',
+      'TableIdent',
+      'affected_tables',
+      'affected_tables_with_overrides',
+      'affected_views',
+      'parse_override_comment',
+    ]),
+    'saltation.iceberg.checkpoint': list([
+      'Checkpoint',
+      'capture',
+      'pin',
+    ]),
+    'saltation.iceberg.txn': list([
+      'Prune',
+      'replace_schema',
+      'restore_pointers',
+      'set_location',
+      'upgrade_format_version',
+    ]),
+    'saltation.iceberg.views': list([
+      'VIEW_SUMMARY',
+      'rename_view',
+      'replace_view',
+      'require_rest',
+      'set_current_version',
+      'update_view_properties',
+    ]),
+    'saltation.migrate': list([
+      'ApplyResult',
+      'StatementResult',
+      'SyncFileResult',
+      'SyncResult',
+      'WatchEvent',
+      'apply_idempotent',
+      'commit',
+      'runner',
+      'saltation_sync',
+      'sync',
+      'watch',
+      'watch_loop',
+    ]),
+    'saltation.migrate.commit': list([
+      'COMMITTED_TAG_PREFIX',
+      'CommitResult',
+      'CommittedFile',
+      'ResetToResult',
+      'UncommitResult',
+      'compute_evolution_hash',
+      'discover_committed_files',
+      'next_sequence_number',
+      'parse_committed_filename',
+      'saltation_commit',
+      'saltation_reset_to',
+      'saltation_uncommit',
+      'slugify',
+    ]),
+    'saltation.migrate.runner': list([
+      'ApplyResult',
+      'CommittedApplyResult',
+      'ResetResult',
+      'StatementResult',
+      'apply_idempotent',
+      'apply_reset',
+      'replay_committed',
+      'rollback_to_last_checkpoint',
+    ]),
+    'saltation.migrate.sync': list([
+      'SyncFileResult',
+      'SyncResult',
+      'SyncStatus',
+      'saltation_sync',
+    ]),
+    'saltation.migrate.watch': list([
+      'WatchEvent',
+      'WatcherFactory',
+      'watch',
+    ]),
+    'saltation.sidecar': list([
+      'bootstrap',
+      'events',
+      'schema',
+      'selfmigrate',
+    ]),
+    'saltation.sidecar.bootstrap': list([
+      'ensure_events_table',
+      'ensure_namespace',
+      'ensure_table_states_table',
+      'ensure_version_table',
+    ]),
+    'saltation.sidecar.events': list([
+      'CommittedEvolution',
+      'CommittedPayload',
+      'Event',
+      'EventType',
+      'TableStateRow',
+      'applied_committed_ids',
+      'committed_evolutions',
+      'committed_payloads',
+      'latest_event',
+      'table_states_for_event',
+      'write_event',
+    ]),
+    'saltation.sidecar.schema': list([
+      'EVENTS_SCHEMA',
+      'EVENTS_TABLE',
+      'SALTATION_SIDECAR_VERSION',
+      'SELF_MIGRATIONS',
+      'TABLE_STATES_SCHEMA',
+      'TABLE_STATES_TABLE',
+      'TABLE_STATES_V2_FIELDS',
+      'VERSION_SCHEMA',
+      'VERSION_TABLE',
+    ]),
+    'saltation.sidecar.selfmigrate': list([
+      'SidecarState',
+      'ensure_current',
+    ]),
+    'saltation.sql': list([
+      'ExpandedSql',
+      'ast',
+      'dialect',
+      'dispatch',
+      'expand',
+      'include',
+      'script',
+      'views',
+    ]),
+    'saltation.sql.ast': list([
+      'AddPartitionField',
+      'AlterColumnPosition',
+      'AlterNamespaceProperties',
+      'DropIdentifierFields',
+      'DropPartitionField',
+      'ReplacePartitionField',
+      'SetIdentifierFields',
+      'UnsetTblProperties',
+      'WriteDistribution',
+      'WriteOrderedBy',
+    ]),
+    'saltation.sql.dialect': list([
+      'SaltationSpark',
+    ]),
+    'saltation.sql.dispatch': list([
+      'DispatchResult',
+      'dispatch',
+    ]),
+    'saltation.sql.include': list([
+      'ExpandedSql',
+      'expand',
+    ]),
+    'saltation.sql.script': list([
+      'SOURCE_DIALECT',
+      'SOURCE_SQL',
+      'VIEW_BODIES',
+      'parse_script',
+    ]),
+    'saltation.sql.views': list([
+      'dispatch_view',
+    ]),
+  })
+# ---
