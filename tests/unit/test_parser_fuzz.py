@@ -453,3 +453,9 @@ def test_deeply_nested_config_is_an_invalid_config_error(tmp_path: Path, value: 
     path.write_text(f'[catalog]\ntype = "sql"\ndeep = {value}\n', encoding="utf-8")
     with pytest.raises(InvalidConfigError):
         load_config(path)
+
+
+def test_partition_on_unknown_column_is_a_saltation_error() -> None:
+    sql = "CREATE TABLE foo.t (p STRUCT<x: INT>) USING iceberg PARTITIONED BY (bucket(4, p.y))"
+    with pytest.raises(DispatchError, match="unknown column 'p.y'"):
+        _front_end(sql, "spark")

@@ -438,7 +438,7 @@ def _create_partition_spec(schema: Schema, fields: list[tuple[str, Transform]]) 
     return PartitionSpec(
         *(
             PartitionField(
-                source_id=schema.find_field(source).field_id,
+                source_id=_source_field_id(schema, source),
                 field_id=PARTITION_FIELD_ID_START + i,
                 transform=transform,
                 name=_create_partition_name(source, transform),
@@ -446,6 +446,13 @@ def _create_partition_spec(schema: Schema, fields: list[tuple[str, Transform]]) 
             for i, (source, transform) in enumerate(fields)
         )
     )
+
+
+def _source_field_id(schema: Schema, source: str) -> int:
+    try:
+        return schema.find_field(source).field_id
+    except ValueError as err:
+        raise DispatchError(f"PARTITIONED BY references unknown column {source!r}") from err
 
 
 def _create_partition_name(source: str, transform: Transform) -> str:
