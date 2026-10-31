@@ -56,18 +56,19 @@ jobs:
         run: docker compose version
 
       - name: Select compose files
-        # DuckDB runs in-process and has no overlay.
+        # docker compose reads COMPOSE_FILE (colon-separated). DuckDB runs
+        # in-process and has no overlay.
         run: |
-          files="-f docker/compose.yml"
+          files="docker/compose.yml"
           overlay="docker/engines/${SALTATION_TEST_ENGINE}/compose.yml"
           if [ -f "$overlay" ]; then
-            files="$files -f $overlay"
+            files="$files:$overlay"
           fi
-          echo "COMPOSE_FILES=$files" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$files" >> "$GITHUB_ENV"
 
       - name: Pre-pull images
         # Keeps image downloads out of pytest's readiness timeouts.
-        run: docker compose $COMPOSE_FILES pull --quiet
+        run: docker compose pull --quiet
 
       - name: Map host.docker.internal to localhost
         # Lakekeeper vends http://host.docker.internal:9000 as the storage
@@ -79,8 +80,8 @@ jobs:
 
       - name: Dump compose logs on failure
         if: failure()
-        run: docker compose $COMPOSE_FILES logs --no-color || true
+        run: docker compose logs --no-color || true
 
       - name: Tear down
         if: always()
-        run: docker compose $COMPOSE_FILES down -v || true
+        run: docker compose down -v || true
