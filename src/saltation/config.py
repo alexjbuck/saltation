@@ -217,19 +217,29 @@ def load_config(path: Path) -> SaltationConfig:
     pydantic validation.
 
     Raises:
-        ConfigNotFoundError: *path* does not exist.
+        ConfigNotFoundError: *path* does not exist or is a directory.
         MissingEnvVarError: One or more ``${VAR}`` references are unset.
         InvalidConfigError: TOML is malformed or fails schema validation.
     """
     path = Path(path)
     if not path.exists():
         raise ConfigNotFoundError(f"Config file not found: {path}")
+    if path.is_dir():
+        raise ConfigNotFoundError(f"Config path is a directory, not a file: {path}")
 
     try:
         with path.open("rb") as fp:
             raw = tomllib.load(fp)
     except tomllib.TOMLDecodeError as exc:
         raise InvalidConfigError(f"Failed to parse TOML at {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise InvalidConfigError(
+            f"Failed to parse TOML at {path}: not UTF-8 ({exc.reason} at byte {exc.start})"
+        ) from exc
+    except RecursionError as exc:
+        raise InvalidConfigError(f"Failed to parse TOML at {path}: nested too deeply") from exc
+    except OSError as exc:
+        raise InvalidConfigError(f"Can't read config at {path}: {exc.strerror or exc}") from exc
 
     missing: list[tuple[str, str]] = []
     interpolated = _interpolate_env(raw, missing)

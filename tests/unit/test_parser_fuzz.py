@@ -1,7 +1,7 @@
 """Fuzz the catalog-free front end: no input may escape as anything but a SaltationError.
 
 The CLI and ``watch`` only catch ``SaltationError``. Each escape found so far is
-in ``KNOWN_ESCAPES`` and pinned by a strict xfail at the bottom; fix one, delete both.
+pinned by a regression test at the bottom.
 """
 
 from __future__ import annotations
@@ -14,24 +14,23 @@ import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from types import FrameType
 from typing import cast
 from unittest import mock
 
 import pytest
-from hypothesis import event, given
+from hypothesis import given
 from hypothesis import strategies as st
 from pyiceberg.catalog import Catalog
-from pyiceberg.exceptions import ValidationError as IcebergValidationError
-from sqlglot.errors import ParseError
 
-import saltation
 from saltation.config import load_config
 from saltation.errors import (
     CircularIncludeError,
+    DispatchError,
     IncludeNotFoundError,
+    InvalidConfigError,
     MissingEnvVarError,
     SaltationError,
+    SqlParseError,
 )
 from saltation.iceberg.affected import affected_tables_with_overrides, affected_views
 from saltation.sql.dispatch import dispatch
@@ -39,58 +38,12 @@ from saltation.sql.include import expand
 from saltation.sql.script import parse_script
 from tests.fixtures.iceberg_corpus import CORPUS
 
-SRC = Path(saltation.__file__).resolve().parent
-# SaltationSpark's parser hooks run inside sqlglot; blame the saltation code that called sqlglot.
-_HOOKS = SRC / "sql" / "dialect.py"
-
-KNOWN_ESCAPES: set[tuple[type[BaseException], str]] = {
-    (ParseError, "parse_script"),
-    (ParseError, "_parse_view"),
-    (RecursionError, "parse_script"),
-    (AttributeError, "_from_table_node"),
-    (AttributeError, "_table_identifier"),
-    (AttributeError, "_namespace_from_table_node"),
-    (AttributeError, "_column_name"),
-    (TypeError, "_coerce_default"),
-    (ValueError, "_dispatch_create_table"),
-    (IcebergValidationError, "_iceberg_type_from_sqlglot"),
-    (ValueError, "_build_iceberg_schema"),
-    (ValueError, "dispatch"),
-    (IsADirectoryError, "_expand_one"),
-    (UnicodeDecodeError, "_expand_one"),
-    # Path.glob/exists rejecting the directive text ('***', NUL, a 300-char name).
-    (ValueError, "_resolve_directive"),
-    (OSError, "_resolve_directive"),
-    (UnicodeDecodeError, "load_config"),
-    (RecursionError, "load_config"),
-}
-
-
-def _raised_in(err: BaseException) -> str:
-    """The innermost saltation function on *err*'s traceback."""
-    files = ((f, Path(f.f_code.co_filename)) for f in _frames(err))
-    frames = [f for f, path in files if path.is_relative_to(SRC) and path != _HOOKS]
-    return frames[-1].f_code.co_name if frames else "<outside saltation>"
-
-
-def _frames(err: BaseException) -> Iterator[FrameType]:
-    tb = err.__traceback__
-    while tb is not None:
-        yield tb.tb_frame
-        tb = tb.tb_next
-
 
 def assert_typed(fn: Callable[[], object]) -> None:
     try:
         fn()
     except SaltationError:
         return
-    except Exception as err:
-        where = _raised_in(err)
-        if (type(err), where) in KNOWN_ESCAPES:
-            event(f"known escape: {type(err).__name__} in {where}")
-            return
-        raise
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -397,19 +350,22 @@ def _dispatch_text(text: str) -> None:
     _front_end(text, "spark")
 
 
-@pytest.mark.xfail(raises=ParseError, strict=True, reason="sqlglot ParseError escapes")
 def test_syntax_error_is_a_saltation_error() -> None:
     with pytest.raises(SaltationError):
         parse_script("CREATE TABLE a.t (id INT")
 
 
-@pytest.mark.xfail(raises=RecursionError, strict=True, reason="sqlglot recursion escapes")
+def test_syntax_error_reports_its_line_in_the_script() -> None:
+    with pytest.raises(SqlParseError) as info:
+        parse_script("CREATE NAMESPACE a;\n\nCREATE TABLE a.t (id INT")
+    assert info.value.line == 3
+
+
 def test_deeply_nested_sql_is_a_saltation_error() -> None:
     with pytest.raises(SaltationError):
         parse_script("SELECT " + "(" * 500 + "1" + ")" * 500)
 
 
-@pytest.mark.xfail(raises=AttributeError, strict=True, reason="a str where a node is expected")
 @pytest.mark.parametrize(
     "sql",
     ["DROP TABLE a..t", "DROP VIEW a..v", "DELETE FROM a..t WHERE id = 1", "CREATE NAMESPACE a..b"],
@@ -419,7 +375,6 @@ def test_empty_identifier_part_is_a_saltation_error(sql: str) -> None:
         _dispatch_text(sql)
 
 
-@pytest.mark.xfail(raises=AttributeError, strict=True, reason="_column_name error path")
 @pytest.mark.parametrize("transform", ["months()", "day()"])
 def test_partition_transform_without_column_is_a_saltation_error(transform: str) -> None:
     with pytest.raises(SaltationError):
@@ -428,13 +383,12 @@ def test_partition_transform_without_column_is_a_saltation_error(transform: str)
         )
 
 
-@pytest.mark.xfail(raises=TypeError, strict=True, reason="pyiceberg literal coercion escapes")
-def test_default_of_wrong_type_is_a_saltation_error() -> None:
-    with pytest.raises(SaltationError):
-        _dispatch_text("CREATE TABLE a.t (id BIGINT DEFAULT 0.5) USING iceberg")
+@pytest.mark.parametrize("column", ["id BIGINT DEFAULT 0.5", "id INT DEFAULT 3000000000"])
+def test_default_not_representable_in_the_column_type_is_a_dispatch_error(column: str) -> None:
+    with pytest.raises(DispatchError):
+        _dispatch_text(f"CREATE TABLE a.t ({column}) USING iceberg")
 
 
-@pytest.mark.xfail(raises=ValueError, strict=True, reason="int() on format-version escapes")
 def test_non_numeric_format_version_is_a_saltation_error() -> None:
     with pytest.raises(SaltationError):
         _dispatch_text(
@@ -442,25 +396,21 @@ def test_non_numeric_format_version_is_a_saltation_error() -> None:
         )
 
 
-@pytest.mark.xfail(raises=IcebergValidationError, strict=True, reason="pyiceberg error escapes")
 def test_decimal_precision_out_of_range_is_a_saltation_error() -> None:
     with pytest.raises(SaltationError):
         _dispatch_text("CREATE TABLE a.t (d DECIMAL(39, 2)) USING iceberg")
 
 
-@pytest.mark.xfail(raises=ValueError, strict=True, reason="pyiceberg Schema error escapes")
 def test_duplicate_column_is_a_saltation_error() -> None:
     with pytest.raises(SaltationError):
         _dispatch_text("CREATE TABLE a.t (id BIGINT, id INT) USING iceberg")
 
 
-@pytest.mark.xfail(raises=ValueError, strict=True, reason="rendering x'' for the error message")
 def test_unsupported_statement_that_cannot_render_is_a_saltation_error() -> None:
     with pytest.raises(SaltationError):
         _dispatch_text("x''")
 
 
-@pytest.mark.xfail(raises=IsADirectoryError, strict=True, reason="include of a directory")
 def test_include_of_a_directory_is_a_saltation_error(tmp_path: Path) -> None:
     (tmp_path / "current").mkdir()
     (tmp_path / "current.sql").write_text("--! include current\n", encoding="utf-8")
@@ -468,14 +418,12 @@ def test_include_of_a_directory_is_a_saltation_error(tmp_path: Path) -> None:
         expand(tmp_path / "current.sql")
 
 
-@pytest.mark.xfail(raises=UnicodeDecodeError, strict=True, reason="non-UTF-8 include escapes")
 def test_non_utf8_include_is_a_saltation_error(tmp_path: Path) -> None:
     (tmp_path / "current.sql").write_bytes(b"-- caf\xe9\n")
     with pytest.raises(SaltationError):
         expand(tmp_path / "current.sql")
 
 
-@pytest.mark.xfail(raises=UnicodeDecodeError, strict=True, reason="non-UTF-8 config escapes")
 def test_non_utf8_config_is_a_saltation_error(tmp_path: Path) -> None:
     path = tmp_path / "saltation.toml"
     path.write_bytes(b'[catalog]\ntype = "sql"\nuri = "caf\xe9"\n')
@@ -483,7 +431,23 @@ def test_non_utf8_config_is_a_saltation_error(tmp_path: Path) -> None:
         load_config(path)
 
 
-@pytest.mark.xfail(raises=IsADirectoryError, strict=True, reason="config path is a directory")
 def test_config_path_that_is_a_directory_is_a_saltation_error(tmp_path: Path) -> None:
     with pytest.raises(SaltationError):
         load_config(tmp_path)
+
+
+@pytest.mark.parametrize("target", ["***", "a\x00b", "x" * 300])
+def test_include_directive_that_is_not_a_path_is_a_saltation_error(
+    tmp_path: Path, target: str
+) -> None:
+    (tmp_path / "current.sql").write_text(f"--! include {target}\n", encoding="utf-8")
+    with pytest.raises(SaltationError):
+        expand(tmp_path / "current.sql")
+
+
+@pytest.mark.parametrize("value", ["[" * 2000 + "]" * 2000, "{a = " * 2000 + "1" + "}" * 2000])
+def test_deeply_nested_config_is_an_invalid_config_error(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "saltation.toml"
+    path.write_text(f'[catalog]\ntype = "sql"\ndeep = {value}\n', encoding="utf-8")
+    with pytest.raises(InvalidConfigError):
+        load_config(path)

@@ -984,6 +984,8 @@
       'NotInitializedError',
       'SaltationError',
       'SidecarVersionAheadError',
+      'SqlFileError',
+      'SqlParseError',
       'UnsupportedStatementError',
     ]),
     'saltation.iceberg': list([
@@ -1008,6 +1010,7 @@
       'affected_tables',
       'affected_tables_with_overrides',
       'affected_views',
+      'identifier_parts',
       'parse_override_comment',
     ]),
     'saltation.iceberg.checkpoint': list([

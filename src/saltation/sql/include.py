@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from saltation.errors import CircularIncludeError, IncludeNotFoundError
+from saltation.errors import CircularIncludeError, IncludeNotFoundError, SqlFileError
 
 __all__ = ["ExpandedSql", "expand"]
 
@@ -70,6 +70,7 @@ def expand(sql_path: Path) -> ExpandedSql:
     Raises:
         IncludeNotFoundError: A directive resolves to no file.
         CircularIncludeError: An include cycle is detected.
+        SqlFileError: A file isn't readable UTF-8 text, or a directive isn't a usable path.
     """
     root = sql_path.resolve()
     visited_stack: list[Path] = []
@@ -102,6 +103,15 @@ def _expand_one(path: Path, visited_stack: list[Path], sources: list[Path]) -> s
         # through ``_resolve_directive`` which raises a richer error before
         # reaching this point.
         raise IncludeNotFoundError(directive=str(path), resolved=path, source=path) from err
+    except IsADirectoryError as err:
+        raise SqlFileError(
+            f"{path} is a directory, not a SQL file; to include the files in it, "
+            f"use a glob such as {path.name}/*.sql"
+        ) from err
+    except UnicodeDecodeError as err:
+        raise SqlFileError(f"{path} isn't UTF-8 text ({err.reason} at byte {err.start})") from err
+    except OSError as err:
+        raise SqlFileError(f"can't read {path}: {err.strerror or err}") from err
 
     out_lines: list[str] = []
     for line in raw.splitlines():
@@ -110,7 +120,12 @@ def _expand_one(path: Path, visited_stack: list[Path], sources: list[Path]) -> s
             out_lines.append(line)
             continue
         directive = match.group(1)
-        resolved_paths = _resolve_directive(directive, including_file=path)
+        try:
+            resolved_paths = _resolve_directive(directive, including_file=path)
+        except (ValueError, OSError) as err:
+            raise SqlFileError(
+                f"include directive '--! include {directive}' in {path} isn't a usable path: {err}"
+            ) from err
         for child in resolved_paths:
             rel = _relpath_for_marker(child, path)
             out_lines.append(f"{_BEGIN_MARKER} {rel}")
