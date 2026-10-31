@@ -64,7 +64,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.ty.src]
-include = ["src"]
+include = ["src", "tests", "scripts", "packaging"]
 
 [tool.ty.rules]
 # Strict by default in src/; per-file relaxations live alongside the offending code.

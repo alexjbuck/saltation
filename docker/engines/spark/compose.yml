@@ -1,0 +1,91 @@
+# Apache Spark (Spark Connect server) overlay for the engine-compatibility
+# suite (tests/engines). Tests connect with pyspark-client to sc://localhost:15002.
+#
+#   docker compose -f docker/compose.yml -f docker/engines/spark/compose.yml up -d
+#
+# The Iceberg runtime and AWS bundle are fetched from Maven Central by
+# --packages when the container starts, so the first healthy state can take
+# several minutes on a cold runner; the healthcheck's start_period allows it.
+#
+# Version pins (chosen 2026-10-31):
+#   apache/spark:4.1.4                                    - latest image (no 4.2+ images yet)
+#   org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.12.0 - latest on Maven Central
+#   org.apache.iceberg:iceberg-aws-bundle:1.12.0          - matches the runtime
+# The pyspark-client version in pyproject.toml's engines group must stay on
+# the same Spark minor as the image.
+
+services:
+  spark:
+    image: apache/spark:4.1.4
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    # Iceberg's REST client applies the table config Lakekeeper vends on
+    # loadTable over the catalog's own s3.* settings, so S3FileIO ends up on
+    # the vended http://host.docker.internal:9000. host-gateway makes that
+    # resolve to the host's published rustfs port (as for lakekeeper).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      AWS_REGION: local
+      # The image's spark user has no writable home; keep spark-daemon's log
+      # and pid files under /tmp.
+      SPARK_LOG_DIR: /tmp/spark-logs
+      SPARK_PID_DIR: /tmp
+    # /opt/entrypoint.sh passes unknown commands through. --wait (must be the
+    # first argument) keeps the server in the foreground.
+    command:
+      - /opt/spark/sbin/start-connect-server.sh
+      - --wait
+      - --master
+      - local[*]
+      - --driver-memory
+      - 2g
+      - --packages
+      - org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.12.0,org.apache.iceberg:iceberg-aws-bundle:1.12.0
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.connect.grpc.binding.port=15002
+      - --conf
+      - spark.sql.session.timeZone=UTC
+      - --conf
+      - spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+      - --conf
+      - spark.sql.catalog.lk=org.apache.iceberg.spark.SparkCatalog
+      - --conf
+      - spark.sql.catalog.lk.type=rest
+      - --conf
+      - spark.sql.catalog.lk.uri=http://lakekeeper:8181/catalog
+      - --conf
+      - spark.sql.catalog.lk.warehouse=saltation
+      # saltation changes tables behind Spark's back between queries; the
+      # default 30s table cache would serve stale schemas.
+      - --conf
+      - spark.sql.catalog.lk.cache-enabled=false
+      - --conf
+      - spark.sql.catalog.lk.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+      - --conf
+      - spark.sql.catalog.lk.s3.endpoint=http://rustfs:9000
+      - --conf
+      - spark.sql.catalog.lk.s3.path-style-access=true
+      - --conf
+      - spark.sql.catalog.lk.s3.access-key-id=saltation-access-key
+      - --conf
+      - spark.sql.catalog.lk.s3.secret-access-key=saltation-secret-key
+      - --conf
+      - spark.sql.catalog.lk.client.region=local
+    healthcheck:
+      # The gRPC port only opens once --packages resolved and the
+      # SparkContext is up. bash's /dev/tcp avoids needing nc/curl.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/15002"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10m
+    ports:
+      - "15002:15002"
+    networks:
+      - saltation

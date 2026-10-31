@@ -1,0 +1,86 @@
+name: engines
+
+# Engine compatibility: tables and views saltation writes through PyIceberg
+# must be readable (and, where the engine can, writable) by real query
+# engines over the same Iceberg REST catalog. One job per engine; the stacks
+# are docker/compose.yml (Lakekeeper + rustfs) plus docker/engines/<engine>/.
+# See docs/engines.md.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, to catch engine-side regressions between saltation changes.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+# The event name keeps the weekly run out of main's push group.
+concurrency:
+  group: engines-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engines:
+    name: engines (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [trino, spark, starrocks, duckdb]
+    env:
+      SALTATION_TEST_ENGINE: ${{ matrix.engine }}
+      # Leave the stack up after pytest so the failure step can dump logs.
+      SALTATION_TEST_KEEP_STACK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --frozen --group engines
+
+      - name: Verify docker compose is available
+        run: docker compose version
+
+      - name: Select compose files
+        # DuckDB runs in-process and has no overlay.
+        run: |
+          files="-f docker/compose.yml"
+          overlay="docker/engines/${SALTATION_TEST_ENGINE}/compose.yml"
+          if [ -f "$overlay" ]; then
+            files="$files -f $overlay"
+          fi
+          echo "COMPOSE_FILES=$files" >> "$GITHUB_ENV"
+
+      - name: Pre-pull images
+        # Keeps image downloads out of pytest's readiness timeouts.
+        run: docker compose $COMPOSE_FILES pull --quiet
+
+      - name: Map host.docker.internal to localhost
+        # Lakekeeper vends http://host.docker.internal:9000 as the storage
+        # endpoint; see the same step in ci.yml.
+        run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+
+      - name: pytest (engines)
+        run: uv run pytest tests/engines -v
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose $COMPOSE_FILES logs --no-color || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose $COMPOSE_FILES down -v || true

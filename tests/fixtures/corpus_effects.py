@@ -201,7 +201,7 @@ def moved(name: str, *, after: str | None) -> list[str]:
     return rest[:idx] + block + rest[idx:]
 
 
-def sort_set(*fields: str, mode: tuple[str | None, str] | None = ("range",)) -> dict[str, Any]:
+def sort_set(*fields: str, mode: tuple[str | None, ...] | None = ("range",)) -> dict[str, Any]:
     out: dict[str, Any] = {"sort": {"-": [], "+": _positioned(list(fields))}}
     if mode is not None:
         out["props"] = {

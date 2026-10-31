@@ -42,7 +42,7 @@ def _alter_actions(sql: str) -> list[exp.Expr]:
 
 def _single(sql: str) -> exp.Expression:
     tree = sqlglot.parse(sql, dialect=SaltationSpark)
-    assert len(tree) == 1
+    assert len(tree) == 1 and tree[0] is not None
     return tree[0]
 
 
@@ -459,6 +459,7 @@ def test_dialect_can_be_passed_as_instance() -> None:
     sql = "ALTER TABLE t ADD PARTITION FIELD x"
     via_class = sqlglot.parse(sql, dialect=SaltationSpark)
     via_instance = sqlglot.parse(sql, dialect=SaltationSpark())
+    assert via_class[0] is not None and via_instance[0] is not None
     via_class_action = via_class[0].args["actions"][0]
     via_instance_action = via_instance[0].args["actions"][0]
     assert type(via_class_action) is type(via_instance_action) is AddPartitionField
