@@ -320,10 +320,13 @@ without one or the other.
 [docs/compatibility.md](./docs/compatibility.md) defines what is public. Two
 checks guard it:
 
-- The `semver` workflow runs [griffe](https://mkdocstrings.github.io/griffe/)
-  against `main` and fails on a breaking change to the public Python API
-  unless the PR adds a `major` change file. Run it locally with
-  `uv run griffe check saltation --search src --against origin/main`.
+- The `semver` workflow runs `scripts/check_semver.py` against the PR base.
+  It compares the public Python API with
+  [griffe](https://mkdocstrings.github.io/griffe/) and the CLI surface
+  (commands, options, exit codes, `--json` keys) with the base ref, and fails
+  on a breaking change unless the PR adds a `major` change file. Run it
+  locally with `uv run python scripts/check_semver.py --base origin/main`
+  (add `--explain` to list breakages without failing).
 - Snapshot tests in `tests/unit/test_cli_contract.py` (using
   [syrupy](https://github.com/syrupy-project/syrupy)) pin CLI help text, exit
   codes, and JSON output shapes. If you change any of these on purpose,

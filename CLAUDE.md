@@ -69,8 +69,9 @@ is **never** the recommended fix — only the last resort.
   ends up in the wrong place (a parent workspace at `$HOME` can otherwise
   capture it). saltation's pyproject.toml declares itself a workspace root
   via `[tool.uv.workspace] members = ["."]` to mitigate.
-- Format/lint: `ruff check` + `ruff format` (select E, F, I, B, UP, RUF).
-  Type-check: `ty check`. Both gates in CI.
+- Format/lint: `ruff check` + `ruff format` (select E, F, I, B, UP, RUF, S).
+  Type-check: `ty check` (covers `src`, `tests`, `scripts`, `packaging`).
+  Both gates in CI.
 - Tests: `pytest`. `tests/unit/` is pure logic plus selective `SqlCatalog`
   use; `tests/integration/` runs the docker-compose stack.
 - Default to **no code comments**. Only add a comment for non-obvious
@@ -149,6 +150,15 @@ these, leave a code comment and move on. No half-finished implementations.
 - `examples/` — self-contained docker stack + guided walkthrough for
   first-time users. Uses different host ports (9181/9001/5433) than
   the test rig (8181/9000/5432) so both can run simultaneously.
+- `docker/engines/<engine>/` + `tests/engines/` — engine interoperability
+  suite (Trino, Spark, StarRocks, DuckDB) layered on the Lakekeeper rig;
+  `SALTATION_TEST_ENGINE` selects. See `docs/engines.md`.
+- `scripts/check_semver.py` — public-contract check (griffe API diff +
+  CLI surface) run by `semver.yml`; `tests/unit/test_cli_contract.py`
+  snapshots help text, exit codes and JSON keys. See
+  `docs/compatibility.md`.
+- `packaging/` — PyInstaller spec for the standalone binaries built by
+  `package.yml`.
 
 ## Known v1.x papercuts (post-V1 backlog)
 

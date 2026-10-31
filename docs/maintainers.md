@@ -55,8 +55,8 @@ open a new, empty release PR.
 | `ci.yml` | `lint + type + unit (py3.12)`, `lint + type + unit (py3.13)`, `lint + type + unit (py3.14)`, `lock`, `integration (lakekeeper)`, `integration (polaris)`, `integration (gravitino)` |
 | `engines.yml` | `engines (trino)`, `engines (spark)`, `engines (starrocks)`, `engines (duckdb)` |
 | `changeset.yml` | `changeset` |
-| `semver.yml` | the griffe API check and the CLI contract job |
-| `ci.yml` (`package` reusable workflow) | the wheel and sdist build, and the install smoke jobs |
+| `semver.yml` | `semver` |
+| `package.yml` | `wheel`, and the `install-smoke` and `binaries` matrix entries (one per OS and Python, one per target) |
 | `security.yml` | `zizmor (workflow audit)`, `pip-audit (locked dependencies)` |
 
 The check picker only offers names that have run at least once in the last
