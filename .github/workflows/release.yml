@@ -1,10 +1,16 @@
 name: release
 
-# Merging the release PR (opened by prepare-release.yml) tags v<version>,
-# creates the GitHub release with the built dists, publishes to TestPyPI,
-# installs from there, and then waits on the `pypi` environment's required
-# reviewers before publishing to PyPI. workflow_dispatch republishes an
-# existing tag (e.g. after fixing a PyPI-side problem). See docs/releasing.md.
+# Merging the release PR (opened by prepare-release.yml) builds and smoke-tests
+# every artifact (package.yml: sdist, wheel, standalone binaries for five
+# targets, provenance attestations), then tags v<version> and creates the
+# GitHub release with all of them attached. PyPI publishing lives in
+# publish-pypi.yml, which this workflow dispatches once the release exists.
+# The `homebrew` job then opens a PR pointing Formula/saltation.rb at the
+# release's sdist.
+#
+# workflow_dispatch rebuilds an existing tag and re-uploads its assets to the
+# existing GitHub release (e.g. after a binary build failed on release day).
+# See docs/releasing.md.
 
 on:
   pull_request:
@@ -13,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to publish, e.g. v0.2.0"
+        description: "Existing release tag to rebuild and re-attach assets for, e.g. v0.2.0"
         required: true
 
 # Every closed PR into main starts this workflow. Only real releases share a
@@ -31,41 +37,15 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       || (github.event.pull_request.merged && github.head_ref == 'release')
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag || github.event.pull_request.merge_commit_sha }}
-
-      - uses: astral-sh/setup-uv@v6
-
-      - name: Version
-        id: version
-        run: |
-          version=$(uv version --short)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ inputs.tag }}" ] && [ "${{ inputs.tag }}" != "v$version" ]; then
-            echo "::error::tag ${{ inputs.tag }} holds version $version"
-            exit 1
-          fi
-
-      - name: Build
-        run: uv build
-
-      - name: Check the dists
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          ls dist/*-"$VERSION"-py3-none-any.whl dist/*-"$VERSION".tar.gz
-          uvx twine check --strict dist/*
-
-      - uses: actions/upload-artifact@v7.0.2
-        with:
-          name: dist
-          path: dist/
-          if-no-files-found: error
+    # actionlint (ci.yml) doesn't accept the newer `$/` self-repository form yet.
+    uses: ./.github/workflows/package.yml # zizmor: ignore[self-repository]
+    with:
+      ref: ${{ inputs.tag || github.event.pull_request.merge_commit_sha }}
+      attest: true
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
   github-release:
     needs: build
@@ -73,18 +53,31 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # gh workflow run publish-pypi.yml
+      actions: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v8.0.2
+      # knope attaches everything in dist/ (knope.toml: assets = "dist/*").
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
 
-      - uses: knope-dev/action@v2.1.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist/
+
+      - name: List the release assets
+        run: ls -l dist/
+
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
         with:
           version: 0.23.2
 
@@ -93,66 +86,161 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: knope release --verbose
 
-  testpypi:
-    needs: [build, github-release]
-    # github-release is skipped on workflow_dispatch (the tag already exists).
-    if: always() && needs.build.result == 'success' && needs.github-release.result != 'failure'
+      # A release created with the workflow token fires no `release` event, so
+      # publish-pypi.yml is started explicitly. It stays inert until the
+      # PYPI_PUBLISH_ENABLED repository variable is set (docs/releasing.md).
+      - name: Start PyPI publishing
+        if: vars.PYPI_PUBLISH_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run publish-pypi.yml --ref "$DEFAULT_BRANCH" -f tag="v$VERSION"
+
+  republish-assets:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/saltation
     permissions:
-      id-token: write
+      contents: write
     steps:
-      - uses: actions/download-artifact@v8.0.2
+      - name: Check the tag matches the built version
+        env:
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG holds version $VERSION"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
 
-      - uses: pypa/gh-action-pypi-publish@v1.14.3
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
+          pattern: binary-*
+          merge-multiple: true
+          path: dist/
 
-  testpypi-install:
-    needs: [build, testpypi]
-    if: always() && needs.testpypi.result == 'success'
+      # Binaries are replaced; a wheel or sdist already on the release is kept,
+      # since PyPI may already hold those exact bytes.
+      - name: Re-upload the assets to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for f in dist/*; do
+            base=$(basename "$f")
+            case "$base" in
+              "saltation-$VERSION-py3-none-any.whl" | "saltation-$VERSION.tar.gz")
+                if grep -qxF "$base" <<< "$existing"; then
+                  echo "keeping the released $base"
+                  continue
+                fi
+                ;;
+            esac
+            gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
+          done
+
+  # Points Formula/saltation.rb (docs/homebrew.md) at the release's sdist and
+  # opens, or updates, a PR with it. Like prepare-release.yml, opening the PR
+  # needs the RELEASE_TOKEN secret or the "Allow GitHub Actions to create and
+  # approve pull requests" setting; a PR opened with GITHUB_TOKEN runs no CI.
+  # If the PR can't be opened, the rendered formula is uploaded as the
+  # `homebrew-formula` artifact instead and the release is left alone.
+  homebrew:
+    needs: [build, github-release, republish-assets]
+    if: >-
+      !cancelled()
+      && needs.build.result == 'success'
+      && (needs.github-release.result == 'success' || needs.republish-assets.result == 'success')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
-      - uses: astral-sh/setup-uv@v6
+      # The formula PR targets the default branch, and the unit tests there
+      # check the formula against that branch's uv.lock.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
-      - name: Install the TestPyPI upload and run it
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Render the formula
+        id: render
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          branch_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$branch_version" != "$VERSION" ]; then
+            echo "::notice::the default branch is at $branch_version; the formula keeps pointing there, not at v$VERSION"
+            exit 0
+          fi
+          name="saltation-$VERSION.tar.gz"
+          # The formula downloads the sdist attached to the release, which a
+          # republish keeps when one is already there; hash those bytes.
+          sdist="dist/$name"
+          if gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir released; then
+            sdist="released/$name"
+          else
+            echo "::warning::could not download $name from release v$VERSION; hashing the build artifact"
+          fi
+          sha256=$(sha256sum "$sdist" | cut -d' ' -f1)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/$name"
+          python3 scripts/render_homebrew_formula.py --version "$VERSION" --url "$url" --sha256 "$sha256"
+          if git diff --quiet -- Formula/saltation.rb; then
+            echo "Formula/saltation.rb already points at v$VERSION"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update the formula PR
+        id: pr
+        if: steps.render.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          branch="homebrew/v$VERSION"
+          title="chore: homebrew formula v$VERSION"
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -m "$title" -- Formula/saltation.rb
+          git push --force origin "$branch"
+          if [ -n "$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "Updated the open PR for $branch"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" \
+              --title "$title" --label no-changeset \
+              --body "Points the Homebrew formula at the v$VERSION sdist. Generated by release.yml with scripts/render_homebrew_formula.py; see docs/homebrew.md."
+          fi
+
+      - name: Keep the rendered formula
+        if: steps.pr.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: homebrew-formula
+          path: Formula/saltation.rb
+
+      - name: Explain the missing PR
+        if: steps.pr.outcome == 'failure'
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          # Only saltation comes from TestPyPI (its dependencies there can be
-          # squatted or stale); everything else resolves from PyPI.
-          for attempt in 1 2 3 4 5 6; do
-            if uvx pip download --no-deps --dest wheel \
-                --index-url https://test.pypi.org/simple/ "saltation==$VERSION"; then
-              break
-            fi
-            sleep $((attempt * 10))
-          done
-          wheel=$(ls wheel/*.whl)
-          uv run --no-project --with "$wheel" -- saltation --version | tee version.txt
-          grep -qx "saltation $VERSION" version.txt
-
-  pypi:
-    needs: [build, testpypi-install]
-    if: always() && needs.testpypi-install.result == 'success'
-    runs-on: ubuntu-latest
-    # Configure required reviewers on this environment: this job waits for
-    # their approval before anything reaches PyPI.
-    environment:
-      name: pypi
-      url: https://pypi.org/p/saltation
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v8.0.2
-        with:
-          name: dist
-          path: dist/
-
-      - uses: pypa/gh-action-pypi-publish@v1.14.3
+          echo "::warning::could not open the Homebrew formula PR for v$VERSION. Set RELEASE_TOKEN or allow GitHub Actions to create pull requests (docs/releasing.md), then commit the homebrew-formula artifact as Formula/saltation.rb or rerun this job."

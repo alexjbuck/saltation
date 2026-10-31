@@ -821,7 +821,7 @@ def _undo_own_moves(catalog: Catalog, baseline: _Baseline) -> list[TableRollback
         elif row.object_kind == "table" and row.pre_metadata_loc is not None:
             try:
                 catalog.register_table(ident, row.pre_metadata_loc)
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             reason = "re-registered after current.sql dropped it"
         else:

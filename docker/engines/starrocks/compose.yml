@@ -1,0 +1,34 @@
+# StarRocks (all-in-one FE + BE) overlay for the engine-compatibility suite
+# (tests/engines). The Iceberg external catalog is created at test time over
+# the MySQL protocol (tests/engines/engines.py), so no config file is mounted.
+#
+#   docker compose -f docker/compose.yml -f docker/engines/starrocks/compose.yml up -d
+#
+# Version pins (chosen 2026-10-31):
+#   starrocks/allin1-ubuntu:4.1.7 - latest stable release
+
+services:
+  starrocks:
+    image: starrocks/allin1-ubuntu:4.1.7
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    # The catalog is created with vended credentials off and static rustfs
+    # settings, but keep the vended endpoint resolvable regardless.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # The image's own check: bootstrap done (BE registered with the FE),
+      # then FE and BE /api/health. Same script, tighter interval.
+      test: ["CMD", "/data/deploy/health_check.sh"]
+      interval: 5s
+      timeout: 15s
+      retries: 60
+      start_period: 60s
+    ports:
+      - "9030:9030"
+      - "8030:8030"
+    networks:
+      - saltation

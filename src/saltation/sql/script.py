@@ -21,10 +21,10 @@ from __future__ import annotations
 import sqlglot
 from sqlglot import expressions as exp
 from sqlglot.dialects.dialect import Dialect
-from sqlglot.errors import TokenError
+from sqlglot.errors import ParseError, SqlglotError, TokenError
 from sqlglot.tokens import Token, TokenType
 
-from saltation.errors import DispatchError
+from saltation.errors import DispatchError, SqlParseError
 from saltation.sql.dialect import SaltationSpark
 
 __all__ = ["SOURCE_DIALECT", "SOURCE_SQL", "VIEW_BODIES", "parse_script"]
@@ -36,24 +36,47 @@ VIEW_BODIES = "saltation_view_bodies"
 
 def parse_script(text: str, *, view_source_dialect: str = "spark") -> list[exp.Expression]:
     statements: list[exp.Expression] = []
-    for chunk, tokens in _split(text, view_source_dialect):
-        view = _parse_view(chunk, tokens, view_source_dialect)
-        if view is not None:
-            statements.append(view)
-        else:
-            statements += [s for s in sqlglot.parse(chunk, dialect=SaltationSpark) if s is not None]
+    for offset, chunk, tokens in _split(text, view_source_dialect):
+        first_line = text.count("\n", 0, offset)
+        try:
+            view = _parse_view(chunk, tokens, view_source_dialect)
+            if view is not None:
+                statements.append(view)
+            else:
+                parsed = sqlglot.parse(chunk, dialect=SaltationSpark)
+                statements += [s for s in parsed if s is not None]
+        except SqlglotError as err:
+            raise _parse_error(err, first_line) from err
+        except RecursionError as err:
+            raise SqlParseError(
+                "statement nests too deeply", line=first_line + _first_code_line(chunk)
+            ) from err
     return statements
 
 
-def _split(text: str, source_dialect: str) -> list[tuple[str, list[Token]]]:
-    """Statements as (text, Spark tokens rebased to it).
+def _parse_error(err: SqlglotError, first_line: int) -> SqlParseError:
+    details = err.errors[0] if isinstance(err, ParseError) and err.errors else {}
+    reason = details.get("description") or str(err)
+    if details.get("highlight"):
+        reason += f" near {details['highlight']!r}"
+    line = details.get("line")
+    return SqlParseError(reason, line=first_line + line if isinstance(line, int) else None)
+
+
+def _first_code_line(chunk: str) -> int:
+    stripped = chunk.lstrip()
+    return chunk.count("\n", 0, len(chunk) - len(stripped)) + 1
+
+
+def _split(text: str, source_dialect: str) -> list[tuple[int, str, list[Token]]]:
+    """Statements as (offset in *text*, text, Spark tokens rebased to it).
 
     A view body in *source_dialect* is never lexed as Spark: its quoting rules
     differ (Trino's ``'\\'`` is a one-character string; to Spark it's an open
     escape). Spark tokens stop at the body's ``AS`` and the body runs to the
     ``;`` its own dialect's tokenizer finds.
     """
-    chunks: list[tuple[str, list[Token]]] = []
+    chunks: list[tuple[int, str, list[Token]]] = []
     pos = 0
     while pos < len(text):
         tokens, error = _tokenize(SaltationSpark, text[pos:])
@@ -62,7 +85,7 @@ def _split(text: str, source_dialect: str) -> list[tuple[str, list[Token]]]:
         for token in tokens:
             if token.token_type == TokenType.SEMICOLON:
                 if current:
-                    chunks.append((text[pos + start : pos + token.start], current))
+                    chunks.append((pos + start, text[pos + start : pos + token.start], current))
                 start, current = token.end + 1, []
                 continue
             current.append(_rebase(token, start))
@@ -73,7 +96,7 @@ def _split(text: str, source_dialect: str) -> list[tuple[str, list[Token]]]:
             elif depth == 0 and _opens_source_body(current, source_dialect):
                 body_start = pos + token.end + 1
                 end = _body_end(text, body_start, source_dialect)
-                chunks.append((text[pos + start : end], current))
+                chunks.append((pos + start, text[pos + start : end], current))
                 resume = end + 1
                 break
         if resume is not None:
@@ -82,7 +105,7 @@ def _split(text: str, source_dialect: str) -> list[tuple[str, list[Token]]]:
         if error is not None:
             raise DispatchError(f"can't read the script as Spark SQL: {error}") from error
         if current:
-            chunks.append((text[pos + start :], current))
+            chunks.append((pos + start, text[pos + start :], current))
         break
     return chunks
 

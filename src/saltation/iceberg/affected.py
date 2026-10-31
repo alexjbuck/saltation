@@ -32,12 +32,15 @@ from dataclasses import dataclass
 
 from sqlglot import expressions as exp
 
+from saltation.errors import DispatchError
+
 __all__ = [
     "OVERRIDE_RE",
     "TableIdent",
     "affected_tables",
     "affected_tables_with_overrides",
     "affected_views",
+    "identifier_parts",
     "parse_override_comment",
 ]
 
@@ -77,16 +80,19 @@ def _from_table_node(node: exp.Table) -> TableIdent:
     what PyIceberg expects in tuple identifiers — Iceberg catalogs flatten
     everything below the table name into a single namespace path.
     """
-    name = node.name
-    db = node.args.get("db")
-    cat = node.args.get("catalog")
-    parts: list[str] = []
-    if cat is not None:
-        parts.append(cat.name)
-    if db is not None:
-        parts.append(db.name)
-    namespace = ".".join(parts) if parts else None
-    return TableIdent(namespace=namespace, name=name)
+    *namespace, name = identifier_parts(node)
+    return TableIdent(namespace=".".join(namespace) or None, name=name)
+
+
+def identifier_parts(node: exp.Table) -> list[str]:
+    """``catalog``, ``db`` and name of *node*, outermost first, skipping absent parts."""
+    # sqlglot leaves a bare "" (not an Identifier) for the empty part of ``a..t``.
+    parts = [node.args.get("catalog"), node.args.get("db")]
+    names = [p.name if isinstance(p, exp.Expression) else str(p) for p in parts if p is not None]
+    names.append(node.name)
+    if not all(names):
+        raise DispatchError(f"identifier {'.'.join(names)!r} has an empty part")
+    return names
 
 
 def affected_tables(statement: exp.Expression) -> list[TableIdent]:

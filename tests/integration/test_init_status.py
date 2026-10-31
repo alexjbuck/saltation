@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from click.testing import Result
 from pyiceberg.catalog.rest import RestCatalog
 from typer.testing import CliRunner
 
@@ -51,7 +52,7 @@ sidecar_namespace = "{sidecar_ns}"
     return path
 
 
-def _invoke(args: list[str]) -> object:
+def _invoke(args: list[str]) -> Result:
     return CliRunner().invoke(app, args)
 
 

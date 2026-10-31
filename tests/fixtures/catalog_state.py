@@ -88,7 +88,7 @@ def table_snapshot(
             k: v for k, v in table.properties.items() if (catalog_defaults or {}).get(k) != v
         },
         "loc": table.location(),
-        "rows": int(snap.summary["total-records"]) if snap and snap.summary else 0,
+        "rows": int(snap.summary["total-records"] or 0) if snap and snap.summary else 0,
     }
 
 

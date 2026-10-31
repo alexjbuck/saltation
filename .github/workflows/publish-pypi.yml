@@ -1,0 +1,149 @@
+name: publish-pypi
+
+# ============================================================================
+# DISABLED until the repository owner finishes the one-time setup below.
+# Every job is gated on the repository VARIABLE (not secret)
+# PYPI_PUBLISH_ENABLED == 'true'; until it is set, runs show skipped jobs.
+#
+# One-time setup (full detail in docs/releasing.md):
+#   1. PyPI (https://pypi.org/manage/account/publishing/) and TestPyPI
+#      (https://test.pypi.org/manage/account/publishing/): add a (pending)
+#      trusted publisher with owner `alexjbuck`, repository `saltation`,
+#      workflow name `publish-pypi.yml`, environment `pypi` (on PyPI) /
+#      `testpypi` (on TestPyPI).
+#   2. GitHub Settings -> Environments: create `testpypi` (no rules) and
+#      `pypi` with Required reviewers.
+#   3. GitHub Settings -> Secrets and variables -> Actions -> Variables:
+#      add PYPI_PUBLISH_ENABLED = true.
+# ============================================================================
+#
+# Publishes the sdist and wheel attached to a GitHub release: TestPyPI first,
+# then installs that upload and runs it, then waits for the `pypi`
+# environment's reviewers before publishing to PyPI. release.yml dispatches
+# this after creating a release (a release made with the workflow token fires
+# no `release` event); a release published by hand triggers it directly. Run
+# it manually with a tag to republish (e.g. after fixing a PyPI-side problem).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish, e.g. v0.2.0"
+        required: true
+
+concurrency:
+  group: publish-pypi-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    if: vars.PYPI_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.fetch.outputs.version }}
+    steps:
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: false
+
+      # Only the sdist and the wheel: the release also carries the standalone
+      # binaries (saltation-<version>-<target>.tar.gz/.zip), which PyPI must
+      # not get.
+      - name: Download the dists from the release
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*) version="${TAG#v}" ;;
+            *) echo "::error::not a release tag: $TAG"; exit 1 ;;
+          esac
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern "saltation-$version.tar.gz" \
+            --pattern "saltation-$version-py3-none-any.whl"
+          ls -l dist/
+          test -f "dist/saltation-$version.tar.gz"
+          test -f "dist/saltation-$version-py3-none-any.whl"
+          test "$(find dist -type f | wc -l)" -eq 2
+          uvx twine check --strict dist/*
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pypi-dist
+          path: dist/
+          if-no-files-found: error
+
+  testpypi:
+    needs: fetch
+    if: vars.PYPI_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/saltation
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pypi-dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  testpypi-install:
+    needs: [fetch, testpypi]
+    if: vars.PYPI_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: false
+
+      - name: Install the TestPyPI upload and run it
+        env:
+          VERSION: ${{ needs.fetch.outputs.version }}
+        run: |
+          # Only saltation comes from TestPyPI (its dependencies there can be
+          # squatted or stale); everything else resolves from PyPI.
+          for attempt in 1 2 3 4 5 6; do
+            if uvx pip download --no-deps --dest wheel \
+                --index-url https://test.pypi.org/simple/ "saltation==$VERSION"; then
+              break
+            fi
+            sleep $((attempt * 10))
+          done
+          wheel=$(ls wheel/*.whl)
+          uv run --no-project --with "$wheel" -- saltation --version | tee version.txt
+          grep -qx "saltation $VERSION" version.txt
+
+  pypi:
+    needs: [fetch, testpypi-install]
+    if: vars.PYPI_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    # Configure required reviewers on this environment: this job waits for
+    # their approval before anything reaches PyPI.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/saltation
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pypi-dist
+          path: dist/
+
+      # skip-existing makes a manual re-run after a partial upload converge.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          skip-existing: true

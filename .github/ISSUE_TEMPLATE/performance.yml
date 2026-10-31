@@ -1,0 +1,51 @@
+name: Performance problem
+description: Report something that is slower than it should be. Performance fixes are welcome as PRs without opening an issue first.
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you already have a fix, you can skip this form and open a pull request with benchmark or timing evidence instead (see CONTRIBUTING.md).
+  - type: textarea
+    id: summary
+    attributes:
+      label: What is slow
+      description: The command or operation, how long it takes, and how long you expected it to take.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The commands, SQL, and catalog state that show the problem. Include the scale involved, such as the number of tables, evolutions, sidecar events, or saves in watch mode.
+    validations:
+      required: true
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurements
+      description: Timings, profiles, or counts of catalog and object-store requests. Paste profiler output if you have it.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: saltation-version
+    attributes:
+      label: saltation version
+      description: Output of `saltation --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Catalog and version, object store, PyIceberg version, Python version, operating system, and network distance to the catalog.
+    validations:
+      required: true
+  - type: textarea
+    id: analysis
+    attributes:
+      label: Suspected cause
+      description: If you have looked at the code, where you think the time goes.
+    validations:
+      required: false

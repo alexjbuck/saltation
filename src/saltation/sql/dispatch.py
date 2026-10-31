@@ -35,7 +35,8 @@ from pyiceberg.exceptions import (
     ResolveError,
     TableAlreadyExistsError,
 )
-from pyiceberg.expressions.literals import literal
+from pyiceberg.exceptions import ValidationError as IcebergValidationError
+from pyiceberg.expressions.literals import AboveMax, BelowMin, literal
 from pyiceberg.partitioning import PARTITION_FIELD_ID_START, PartitionField, PartitionSpec
 from pyiceberg.schema import Schema, promote
 from pyiceberg.table.sorting import NullOrder
@@ -75,7 +76,7 @@ from pyiceberg.types import (
 from sqlglot import expressions as exp
 
 from saltation.errors import DispatchError, UnsupportedStatementError
-from saltation.iceberg.affected import TableIdent, affected_tables
+from saltation.iceberg.affected import TableIdent, affected_tables, identifier_parts
 from saltation.iceberg.txn import replace_schema, set_location, upgrade_format_version
 from saltation.sql.ast import (
     AddPartitionField,
@@ -176,7 +177,7 @@ def dispatch(
         return DispatchResult(notes="(no-op: bare semicolon)")
 
     raise UnsupportedStatementError(
-        statement_sql=statement.sql(),
+        statement_sql=_render_sql(statement),
         reason=(
             f"unrecognised statement type {type(statement).__name__}; "
             "see plan §2.2 for the v1 supported list"
@@ -186,6 +187,17 @@ def dispatch(
 
 def _kind(node: exp.Expression) -> str:
     return (node.args.get("kind") or "").upper()
+
+
+def _render_sql(node: exp.Expression) -> str:
+    """*node* as SQL for an error message, even when a dialect can't render it."""
+    # sqlglot's default dialect turns x'' into int('', 16) and raises.
+    for dialect in (None, SaltationSpark):
+        try:
+            return node.sql(dialect=dialect)
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return repr(node)
 
 
 # ---------------------------------------------------------------------------
@@ -201,15 +213,7 @@ def _namespace_from_table_node(node: exp.Expression) -> str:
     """
     if not isinstance(node, exp.Table):
         return str(node)
-    parts: list[str] = []
-    cat = node.args.get("catalog")
-    db = node.args.get("db")
-    if cat is not None:
-        parts.append(cat.name)
-    if db is not None:
-        parts.append(db.name)
-    parts.append(node.name)
-    return ".".join(parts)
+    return ".".join(identifier_parts(node))
 
 
 def _dispatch_create_namespace(catalog: Catalog, stmt: exp.Create) -> DispatchResult:
@@ -291,15 +295,7 @@ def _dispatch_drop_namespace(catalog: Catalog, stmt: exp.Drop) -> DispatchResult
 
 def _table_identifier(table_node: exp.Table) -> tuple[str, ...]:
     """Convert an ``exp.Table`` into a tuple identifier for PyIceberg."""
-    parts: list[str] = []
-    cat = table_node.args.get("catalog")
-    db = table_node.args.get("db")
-    if cat is not None:
-        parts.append(cat.name)
-    if db is not None:
-        parts.append(db.name)
-    parts.append(table_node.name)
-    return tuple(parts)
+    return tuple(identifier_parts(table_node))
 
 
 def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult:
@@ -344,7 +340,11 @@ def _dispatch_create_table(catalog: Catalog, stmt: exp.Create) -> DispatchResult
     schema = _build_iceberg_schema(column_defs)
     if_not_exists = bool(stmt.args.get("exists"))
     options = _create_table_options(stmt)
-    version = int(options.properties.get(_FORMAT_VERSION_KEY, "2"))
+    raw_version = options.properties.get(_FORMAT_VERSION_KEY, "2")
+    try:
+        version = int(raw_version)
+    except ValueError as err:
+        raise DispatchError(f"format-version must be an integer, got {raw_version!r}") from err
     if any(f.write_default is not None for f in schema.fields):
         _require_v3(version, "a column DEFAULT")
     if any(_is_v3_type(f.field_type) for f in schema.fields):
@@ -438,7 +438,7 @@ def _create_partition_spec(schema: Schema, fields: list[tuple[str, Transform]]) 
     return PartitionSpec(
         *(
             PartitionField(
-                source_id=schema.find_field(source).field_id,
+                source_id=_source_field_id(schema, source),
                 field_id=PARTITION_FIELD_ID_START + i,
                 transform=transform,
                 name=_create_partition_name(source, transform),
@@ -446,6 +446,13 @@ def _create_partition_spec(schema: Schema, fields: list[tuple[str, Transform]]) 
             for i, (source, transform) in enumerate(fields)
         )
     )
+
+
+def _source_field_id(schema: Schema, source: str) -> int:
+    try:
+        return schema.find_field(source).field_id
+    except ValueError as err:
+        raise DispatchError(f"PARTITIONED BY references unknown column {source!r}") from err
 
 
 def _create_partition_name(source: str, transform: Transform) -> str:
@@ -1211,16 +1218,23 @@ def _column_name(node: exp.Expression | None) -> str:
         decimals = node.args.get("decimals")
         if decimals is not None:
             return _column_name(_unwrap_cast(decimals))
+    if (
+        isinstance(node, exp.Func)
+        and not isinstance(node, exp.Cast)
+        and node.find(exp.Column, exp.Identifier) is None
+    ):
+        name = node.name if isinstance(node, exp.Anonymous) else _typed_func_name(node)
+        raise DispatchError(f"transform {name.lower()}() has no source column")
     if isinstance(node, exp.Func):
         for arg in node.args.get("expressions") or []:
             if isinstance(arg, exp.Column | exp.Identifier):
                 return _column_name(arg)
         this = node.args.get("this")
-        if this is not None:
+        if isinstance(this, exp.Expression):
             return _column_name(_unwrap_cast(this))
     if isinstance(node, exp.Cast):
         return _column_name(node.args.get("this"))
-    raise DispatchError(f"could not extract source column from {node.sql()}")
+    raise DispatchError(f"could not extract source column from {_render_sql(node)}")
 
 
 def _unwrap_cast(node: exp.Expression) -> exp.Expression:
@@ -1403,7 +1417,7 @@ def _dispatch_delete(catalog: Catalog, stmt: exp.Delete) -> DispatchResult:
         predicate = where.this
         delete_filter = predicate.sql(dialect="spark")
         matched = _delete(table, delete_filter=delete_filter)
-        base = f"delete from {'.'.join(identifier)} where {delete_filter}"
+        base = f"delete from {'.'.join(identifier)} where {delete_filter}"  # noqa: S608
         # A re-run of a DELETE matches no rows — the idempotent steady state,
         # not an error. Reflect it as a note instead of leaking PyIceberg's
         # raw "did not match any records" warning to stderr every re-apply.
@@ -1568,6 +1582,9 @@ def _build_iceberg_schema(column_defs: list[exp.Expression]) -> Schema:
         if not isinstance(node, exp.ColumnDef):
             raise DispatchError(f"unexpected node in column list: {type(node).__name__}")
         top.append((ids.next(), node))
+    names = [node.name for _, node in top]
+    if dupes := sorted({n for n in names if names.count(n) > 1}):
+        raise DispatchError(f"duplicate column name(s) {dupes} in the column list")
     fields: list[NestedField] = []
     for field_id, node in top:
         iceberg_type = _iceberg_type_from_sqlglot(node.args.get("kind"), ids)
@@ -1589,7 +1606,10 @@ def _build_iceberg_schema(column_defs: list[exp.Expression]) -> Schema:
                 write_default=_coerce_default(default, iceberg_type),
             )
         )
-    return Schema(*fields)
+    try:
+        return Schema(*fields)
+    except ValueError as err:
+        raise DispatchError(f"invalid column list: {err}") from err
 
 
 def _column_comment(col_def: exp.ColumnDef) -> str | None:
@@ -1603,8 +1623,15 @@ def _column_comment(col_def: exp.ColumnDef) -> str | None:
 def _coerce_default(value: str | bool | int | float | None, to: IcebergType) -> Any:
     if value is None:
         return None
-    # literal() is typed with a constrained TypeVar, which a union can't satisfy.
-    return literal(value).to(to).value  # ty: ignore[invalid-argument-type]
+    try:
+        # literal() is typed with a constrained TypeVar, which a union can't satisfy.
+        coerced = literal(value).to(to)  # ty: ignore[invalid-argument-type]
+    except (TypeError, ValueError) as err:
+        raise DispatchError(f"DEFAULT {value!r} isn't representable as {to}: {err}") from err
+    # Out-of-range values come back as a sentinel that clamps to the type's bound.
+    if isinstance(coerced, AboveMax | BelowMin):
+        raise DispatchError(f"DEFAULT {value!r} is out of range for {to}")
+    return coerced.value
 
 
 def _column_default(col_def: exp.ColumnDef) -> str | bool | int | float | None:
@@ -1670,7 +1697,10 @@ def _iceberg_type_from_sqlglot(
         params = kind.args.get("expressions") or []
         precision = _decimal_param(params, 0, default=38)
         scale = _decimal_param(params, 1, default=0)
-        return DecimalType(precision=precision, scale=scale)
+        try:
+            return DecimalType(precision=precision, scale=scale)
+        except IcebergValidationError as err:
+            raise DispatchError(f"DECIMAL({precision}, {scale}) is out of range: {err}") from err
     if base == exp.DataType.Type.STRUCT:
         return _struct_type_from_sqlglot(kind, ids)
     if base == exp.DataType.Type.ARRAY:

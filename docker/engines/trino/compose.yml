@@ -1,0 +1,35 @@
+# Trino overlay for the engine-compatibility suite (tests/engines).
+#
+#   docker compose -f docker/compose.yml -f docker/engines/trino/compose.yml up -d
+#
+# Relative paths below resolve against docker/ (the directory of the first
+# compose file), not this directory.
+#
+# Version pins (chosen 2026-10-31):
+#   trinodb/trino:484 - latest stable release
+
+services:
+  trino:
+    image: trinodb/trino:484
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    # Trino reads storage with its own S3 settings (etc/catalog), but keep the
+    # vended endpoint resolvable in case vended credentials get switched on.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./engines/trino/etc/catalog/lakekeeper.properties:/etc/trino/catalog/lakekeeper.properties:ro
+    healthcheck:
+      # Shipped in the image: curls /v1/info and waits for "starting": false.
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+    ports:
+      - "8080:8080"
+    networks:
+      - saltation

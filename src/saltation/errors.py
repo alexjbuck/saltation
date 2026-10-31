@@ -29,6 +29,11 @@ class IncludeNotFoundError(SaltationError):
         )
 
 
+class SqlFileError(SaltationError):
+    """Raised when an evolution or included file can't be read as UTF-8 SQL text, or an
+    ``--! include`` directive doesn't name a usable path."""
+
+
 class CircularIncludeError(SaltationError):
     """Raised when ``--! include`` resolution forms a cycle.
 
@@ -76,6 +81,16 @@ class DispatchError(SaltationError):
     from :class:`UnsupportedStatementError` (the SQL is recognised — we just can't
     run it).
     """
+
+
+class SqlParseError(DispatchError):
+    """Raised when an evolution script isn't valid SQL; ``line`` is 1-based in the parsed text."""
+
+    def __init__(self, reason: str, *, line: int | None = None) -> None:
+        self.reason = reason
+        self.line = line
+        location = f" at line {line}" if line is not None else ""
+        super().__init__(f"can't parse SQL{location}: {reason}")
 
 
 class EvolutionNotFoundError(SaltationError):

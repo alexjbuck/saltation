@@ -218,9 +218,7 @@ def test_lifecycle(rest_catalog: RestCatalog) -> None:
     del rest_catalog  # brings the rig up
     # Each example is ~10 catalog-mutating steps; a quarter of the profile's
     # examples keeps the run comparable to the other properties.
-    budget = settings(
-        max_examples=max(4, settings.default.max_examples // 4), stateful_step_count=10
-    )
+    budget = settings(max_examples=max(4, settings().max_examples // 4), stateful_step_count=10)
     run_state_machine_as_test(Lifecycle, settings=budget)
 
 
