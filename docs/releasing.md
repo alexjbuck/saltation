@@ -42,7 +42,10 @@ The `changeset` check fails a PR without a change file. Label the PR
    - tags `v<version>` and creates the GitHub release with every artifact
      attached (`knope release`, which uploads `dist/*`);
    - if `PYPI_PUBLISH_ENABLED` is set, dispatches `publish-pypi.yml` for the
-     new tag.
+     new tag;
+   - renders `Formula/saltation.rb` against the release's sdist and opens a
+     PR titled `chore: homebrew formula v<version>`. Merge it so
+     `brew install saltation` gets the release ([homebrew.md](./homebrew.md)).
 4. `publish-pypi.yml` (once enabled) downloads the sdist and wheel from the
    release, publishes to **TestPyPI**, installs that upload and runs
    `saltation --version`, then waits for approval on the **`pypi`**
@@ -74,6 +77,8 @@ archive.
   made): run `release.yml` manually with the tag. It rebuilds from the tag
   and re-uploads the binaries to the existing release. A wheel or sdist
   already on the release is kept, since PyPI may hold those exact bytes.
+  The `homebrew` job runs again too; it only updates the formula PR when the
+  tag is the version on `main`.
 - **Republish to PyPI** (e.g. after fixing a PyPI-side problem): run
   `publish-pypi.yml` manually with the tag. Both uploads skip files the index
   already has, so a re-run after a partial upload converges.

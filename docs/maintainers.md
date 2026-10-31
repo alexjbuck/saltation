@@ -97,6 +97,18 @@ permitted to create or approve pull requests". Fix it one of two ways:
   GitHub App installation token with the same permissions. PRs opened with it
   trigger CI normally. Set a calendar reminder for its expiry date.
 
+- [ ] The Homebrew formula PR that `release.yml` opens after each release
+      ([homebrew.md](./homebrew.md)) needs the same setting or
+      `RELEASE_TOKEN`. Without either, the job uploads the formula as the
+      `homebrew-formula` artifact instead; commit it as
+      `Formula/saltation.rb` by hand.
+- [ ] Once, on a Mac: tap the repository and run `brew install --HEAD`,
+      `brew test` and `brew audit --strict --online` on the formula, as in
+      [homebrew.md](./homebrew.md#testing-locally). The formula was written
+      and checked without running Homebrew, so this first install and audit
+      is its only real-machine check. Repeat after the first release with a
+      plain `brew install`.
+
 ### 4. Environments
 
 **Settings → Environments → New environment**
@@ -231,6 +243,8 @@ accounts)
      wheel, sdist, and a binary for each platform;
    - <https://pypi.org/project/saltation/> shows the new version;
    - `uvx saltation@<version> --version` prints the new version.
+   - the `chore: homebrew formula v<version>` PR is open; merge it once CI
+     is green.
 7. If a step after tagging fails, fix the cause and re-run `release.yml`
    manually with the existing tag (see [releasing.md](./releasing.md)).
 

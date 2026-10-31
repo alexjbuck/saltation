@@ -159,6 +159,10 @@ these, leave a code comment and move on. No half-finished implementations.
   `docs/compatibility.md`.
 - `packaging/` — PyInstaller spec for the standalone binaries built by
   `package.yml`.
+- `Formula/saltation.rb` — Homebrew tap formula, generated from `uv.lock`
+  by `scripts/render_homebrew_formula.py` (never edit by hand; the unit
+  test fails when it is stale). `release.yml` re-renders it per release.
+  See `docs/homebrew.md`.
 
 ## Known v1.x papercuts (post-V1 backlog)
 

@@ -47,6 +47,14 @@ uv tool install saltation
 uvx saltation --help
 ```
 
+Homebrew (macOS and Linux), from this repository as a tap:
+
+```bash
+brew tap alexjbuck/saltation https://github.com/alexjbuck/saltation
+brew install saltation          # once a release is out
+brew install --HEAD saltation   # until then, builds main
+```
+
 ## Quickstart (dev)
 
 ```bash
