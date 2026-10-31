@@ -55,9 +55,10 @@ gh attestation verify saltation-0.2.0-linux-x86_64.tar.gz --repo alexjbuck/salta
     "Run anyway", or unblock the zip (Properties, Unblock) before extracting.
 - **No SBOM yet.** The bundled dependency versions are the ones pinned in
   `uv.lock` at the release tag.
-- **Linux needs a recent glibc.** The Linux builds are made on Ubuntu 24.04
-  (glibc 2.39). Older distributions (RHEL 8/9, Ubuntu 22.04, Debian 12) may
-  refuse to start them; use the wheel there. There is no musl (Alpine) build.
+- **Linux needs glibc 2.28 or newer** (RHEL 8, Ubuntu 20.04, Debian 10 and
+  later) and the system's `libstdc++`. The bundle embeds a glibc-2.17
+  interpreter and pyarrow's manylinux_2_28 libraries, and deliberately leaves
+  the build host's C++ runtime out. There is no musl (Alpine) build.
 - **Catalogs and storage.** The REST catalog and PyArrow's FileIO (local
   files, S3 and S3-compatible stores, plus whatever else that platform's
   PyArrow build supports, such as GCS) are included.

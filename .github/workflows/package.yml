@@ -149,21 +149,18 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # A CPython with a shared libpython, which PyInstaller embeds.
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
-        id: python
-        with:
-          python-version-file: .python-version
-
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: false
 
+      # uv's managed CPython (python-build-standalone) ships a shared
+      # libpython for PyInstaller to embed and, on Linux, targets glibc 2.17,
+      # so the bundle isn't pinned to the runner's glibc the way the
+      # toolcache interpreter would pin it.
       - name: Install the locked runtime dependencies and PyInstaller
         env:
-          UV_PYTHON: ${{ steps.python.outputs.python-path }}
-          UV_PYTHON_DOWNLOADS: never
-        run: uv sync --frozen --no-dev --no-editable --group package
+          UV_PYTHON_DOWNLOADS: auto
+        run: uv sync --frozen --no-dev --no-editable --group package --managed-python
 
       - name: Build the bundle
         run: uv run --no-sync pyinstaller --noconfirm --clean packaging/saltation.spec

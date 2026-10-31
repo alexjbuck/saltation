@@ -43,6 +43,13 @@ a = Analysis(
     excludes=["tkinter", "pytest", "IPython"],
     noarchive=False,
 )
+# The build host's C++ runtime would pin the bundle to that host's glibc
+# (2.38 on Ubuntu 24.04). Every target ships its own, and pyarrow's
+# manylinux_2_28 wheels already expect it there; leaving these out drops the
+# Linux floor to glibc 2.28 (RHEL 8, Ubuntu 20.04 and newer).
+_HOST_RUNTIME = ("libstdc++.so.6", "libgcc_s.so.1")
+a.binaries = [b for b in a.binaries if os.path.basename(b[0]) not in _HOST_RUNTIME]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
