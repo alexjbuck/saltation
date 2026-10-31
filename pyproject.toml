@@ -13,6 +13,9 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Operating System :: OS Independent",
+  "Typing :: Typed",
   "Topic :: Database",
   "Topic :: Software Development :: Version Control",
 ]
@@ -30,6 +33,9 @@ saltation = "saltation.cli:app"
 
 [project.urls]
 Repository = "https://github.com/alexjbuck/saltation"
+Documentation = "https://github.com/alexjbuck/saltation#readme"
+Changelog = "https://github.com/alexjbuck/saltation/blob/main/CHANGELOG.md"
+Issues = "https://github.com/alexjbuck/saltation/issues"
 
 [build-system]
 requires = ["uv_build>=0.9.26,<0.10.0"]
@@ -45,11 +51,13 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "RUF"]
-ignore = []
+select = ["E", "F", "I", "B", "UP", "RUF", "S"]
+# S101: asserts state invariants in src; saltation is never run with -O.
+ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["B"]
+"tests/**/*.py" = ["B", "S105", "S108", "S110", "S310", "S603", "S607", "S608"]
+"scripts/**/*.py" = ["S603", "S607"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -66,12 +74,35 @@ testpaths = ["tests"]
 addopts = "-ra"
 pythonpath = ["src"]
 
+[tool.coverage.run]
+source = ["saltation"]
+branch = true
+relative_files = true
+
+[tool.coverage.paths]
+source = ["src/saltation", "*/site-packages/saltation"]
+
+[tool.coverage.report]
+skip_empty = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\.$"]
+
 [dependency-groups]
 dev = [
+  "griffe>=2.4.1",
   "hypothesis>=6.152.9",
   "pytest>=9.0.3",
+  "pytest-cov>=7.1.0",
   "pytest-xdist>=3.8.0",
   "ruff>=0.15.14",
   "syrupy>=5.2.0",
   "ty>=0.0.39",
+]
+engines = [
+    "duckdb>=2.0.0",
+    "pymysql>=1.2.3",
+    "pyspark-client>=4.1,<4.2",
+    "trino>=0.340.0",
+]
+package = [
+    "pyinstaller>=6.22.3",
 ]

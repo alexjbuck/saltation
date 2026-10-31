@@ -1403,7 +1403,7 @@ def _dispatch_delete(catalog: Catalog, stmt: exp.Delete) -> DispatchResult:
         predicate = where.this
         delete_filter = predicate.sql(dialect="spark")
         matched = _delete(table, delete_filter=delete_filter)
-        base = f"delete from {'.'.join(identifier)} where {delete_filter}"
+        base = f"delete from {'.'.join(identifier)} where {delete_filter}"  # noqa: S608
         # A re-run of a DELETE matches no rows — the idempotent steady state,
         # not an error. Reflect it as a note instead of leaking PyIceberg's
         # raw "did not match any records" warning to stderr every re-apply.

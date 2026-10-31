@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/alexjbuck/saltation/security/policy
+    about: Do not open a public issue. Follow SECURITY.md to report a vulnerability privately.
+  - name: Documentation and usage
+    url: https://github.com/alexjbuck/saltation#readme
+    about: GitHub Discussions are not enabled. Check the README and docs/ first; if your question remains, open the closest matching issue form.

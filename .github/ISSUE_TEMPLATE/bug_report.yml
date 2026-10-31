@@ -1,0 +1,100 @@
+name: Bug report
+description: Report incorrect behaviour in saltation. Bug fixes are welcome as PRs without opening an issue first.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. If you already have a fix, you can skip this form and open a pull request with a regression test instead (see CONTRIBUTING.md).
+
+        Do not report security vulnerabilities here. Follow [SECURITY.md](https://github.com/alexjbuck/saltation/blob/main/SECURITY.md) instead.
+
+        If the problem is in PyIceberg or a catalog rather than in saltation, use the upstream form.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: Describe the problem and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest `saltation.toml` (credentials removed), SQL, and commands that show the problem.
+      placeholder: |
+        current.sql:
+        CREATE TABLE IF NOT EXISTS ns.t (id bigint) USING iceberg;
+
+        $ saltation apply --json --path saltation.toml
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The full error message, traceback, or `--json` output, and the exit code.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: saltation-version
+    attributes:
+      label: saltation version
+      description: Output of `saltation --version`.
+      placeholder: saltation 0.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed from
+      options:
+        - PyPI (uv tool, uvx, or pip)
+        - Standalone binary from GitHub releases
+        - Source checkout
+    validations:
+      required: true
+  - type: dropdown
+    id: catalog
+    attributes:
+      label: Catalog
+      options:
+        - Lakekeeper
+        - Apache Polaris
+        - Apache Gravitino
+        - Other REST catalog
+        - SQL catalog
+        - AWS Glue
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Catalog version, PyIceberg version, Python version, and operating system.
+      placeholder: |
+        Lakekeeper v0.10.0
+        pyiceberg 0.12.0
+        Python 3.13.1
+        macOS 15.5 (arm64)
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Apply mode
+      options:
+        - Idempotent (default)
+        - Reset (--reset or [dev].mode = "reset")
+        - Not applicable
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps, such as whether it reproduces on another catalog.
+    validations:
+      required: false

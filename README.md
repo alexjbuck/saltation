@@ -1,5 +1,12 @@
 # saltation
 
+[![CI](https://github.com/alexjbuck/saltation/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alexjbuck/saltation/actions/workflows/ci.yml)
+[![Engines](https://github.com/alexjbuck/saltation/actions/workflows/engines.yml/badge.svg?branch=main)](https://github.com/alexjbuck/saltation/actions/workflows/engines.yml)
+[![Security](https://github.com/alexjbuck/saltation/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/alexjbuck/saltation/actions/workflows/security.yml)
+[![PyPI](https://img.shields.io/pypi/v/saltation)](https://pypi.org/project/saltation/)
+[![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2Falexjbuck%2Fsaltation%2Fmain%2Fpyproject.toml)](https://github.com/alexjbuck/saltation/blob/main/pyproject.toml)
+[![License](https://img.shields.io/github/license/alexjbuck/saltation)](./LICENSE)
+
 In evolutionary biology, *saltation* is change by sudden leaps rather than slow drift. That's how a data lake's schema evolves: long stretches of stability, then a migration that has to land exactly right. Saltation makes those leaps safe for Apache Iceberg tables.
 
 Write the schema evolution (migration) as SQL, iterate on it locally with hot reload, then commit it and let CI apply it non-interactively, with the same tool in both places. Don't let your data architecture fossilize.
@@ -236,11 +243,38 @@ The sidecar tables (`events`, `table_states`, `version`) are append-only
 and self-migrated forward by saltation itself. Their names are fixed; only
 the namespace is user-configurable.
 
-## Release infrastructure
+## Tested against
 
-PyPI release is configured separately (no `release.yml` in this repo
-yet). The package builds with `uv build` and publishes via trusted
-publishing once the workflow is added.
+Every pull request runs the full integration suite against the latest
+stable release of each supported REST catalog, and checks that other
+engines read what saltation writes.
+
+- **Catalogs**: [Lakekeeper](https://github.com/lakekeeper/lakekeeper),
+  [Apache Polaris](https://polaris.apache.org/), and
+  [Apache Gravitino](https://gravitino.apache.org/).
+- **Engines**: Trino, Spark, StarRocks, and DuckDB. See
+  [docs/engines.md](./docs/engines.md) for what each engine checks.
+
+## Releases
+
+Releases are cut from change files with [knope](https://knope.tech); see
+[docs/releasing.md](./docs/releasing.md) for the process. Each release on the
+[GitHub releases page](https://github.com/alexjbuck/saltation/releases)
+carries the wheel, the sdist, and standalone binaries that need no Python
+install, for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
+(x86_64). The same version is published to PyPI.
+
+## Contributing
+
+Bug fixes and performance improvements are welcome as pull requests; new
+features start with a feature-request issue so the design can be agreed
+first. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the policy, development
+setup, and test expectations.
+
+## Security
+
+Report vulnerabilities privately as described in
+[SECURITY.md](./SECURITY.md), not in a public issue.
 
 ## License
 

@@ -1,0 +1,71 @@
+name: Upstream problem
+description: Track a bug in PyIceberg, a REST catalog, or a query engine that affects saltation.
+title: "[upstream: <component>] "
+labels: ["upstream"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when saltation sends a correct request and PyIceberg, a catalog, or an engine gets it wrong. Write the summary and reproduction so they can be filed upstream as they are. Replace `<component>` in the title with the component, for example `[upstream: pyiceberg]`. A maintainer adds the component label.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - PyIceberg (apache/iceberg-python)
+        - Lakekeeper
+        - Apache Polaris
+        - Apache Gravitino
+        - Query engine (Trino, Spark, StarRocks, DuckDB)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What the component does wrong, and what the Iceberg spec or its own documentation says it should do.
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Exact versions of the upstream component, PyIceberg, and saltation. Note whether the latest release still has the problem.
+      placeholder: |
+        - pyiceberg 0.12.0 with pyiceberg-core 0.10.1 (latest releases)
+        - saltation 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: A minimal reproduction that does not need saltation where possible (for example plain PyIceberg calls or REST requests), plus the error output.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact on saltation
+      description: Which statements or commands are affected, and what saltation does today (explicit refusal, workaround, or a `catalog_refuses` entry in tests/fixtures/corpus_effects.py).
+    validations:
+      required: true
+  - type: input
+    id: upstream-link
+    attributes:
+      label: Upstream issue
+      description: Link to the upstream issue or pull request, if one exists yet.
+      placeholder: https://github.com/apache/iceberg-python/issues/...
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing upstream
+      options:
+        - label: I searched the upstream tracker for duplicates.
+          required: false
+        - label: I reproduced this on the latest upstream release.
+          required: false

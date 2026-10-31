@@ -200,7 +200,8 @@ class Features:
     # Also covers relaxing a column an earlier SET NOT NULL asserted.
     relax_former_identifier: bool = False
     multiple_reorders: bool = False
-    # Re-adding a dropped partition field reorders the spec on replay.
+    # Re-adding a dropped partition field reorders the spec on replay. Also
+    # gates a new time transform on a column whose time field was dropped.
     readd_partition_field: bool = False
     alter_type: bool = True
     alter_comment: bool = True
@@ -309,13 +310,16 @@ def _create(draw: st.DrawFn, name: str, features: Features) -> tuple[str, TableM
 
 def _partition_options(t: TableModel, features: Features) -> list[tuple[Column, str, str]]:
     used = {(p.source, p.transform) for p in t.partition}
+    timed = {p.source for p in t.partition if p.transform in _TIME_TRANSFORMS}
     if not features.readd_partition_field:
         used |= t.dropped_partitions
+        # Replay re-adds a dropped time field beside any later one on its
+        # column, e.g. year(c) next to month(c), and Lakekeeper refuses that spec.
+        timed |= {src for src, tr in t.dropped_partitions if tr in _TIME_TRANSFORMS}
     options: list[tuple[Column, str, str]] = []
     for c in t.columns:
-        has_time = any(p.source == c.name and p.transform in _TIME_TRANSFORMS for p in t.partition)
         for tmpl, tr in _transforms(c.type):
-            if (c.name, tr) in used or (tr in _TIME_TRANSFORMS and has_time):
+            if (c.name, tr) in used or (tr in _TIME_TRANSFORMS and c.name in timed):
                 continue
             options.append((c, tmpl.format(c=c.name), tr))
     return options

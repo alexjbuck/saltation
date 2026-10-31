@@ -17,3 +17,9 @@ wheels/
 
 # OS noise
 .DS_Store
+
+# Coverage
+.coverage
+.coverage.*
+coverage-*.xml
+htmlcov/
