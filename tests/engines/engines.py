@@ -52,17 +52,23 @@ class Engine(Protocol):
     # sqlglot dialect name of the view representation this engine reads.
     view_dialect: str
 
-    def ping(self) -> None: ...
+    def ping(self) -> None:
+        """Raise unless the engine answers a trivial query."""
 
-    def query(self, sql: str) -> list[tuple[Any, ...]]: ...
+    def query(self, sql: str) -> list[tuple[Any, ...]]:
+        """Run *sql* and return every row."""
 
-    def columns(self, namespace: str, table: str) -> list[str]: ...
+    def columns(self, namespace: str, table: str) -> list[str]:
+        """Column names of the table, in the engine's order."""
 
-    def table_ref(self, namespace: str, table: str) -> str: ...
+    def table_ref(self, namespace: str, table: str) -> str:
+        """How the engine spells the table's three-part name."""
 
-    def insert(self, namespace: str, table: str, rows: Sequence[Sequence[object]]) -> None: ...
+    def insert(self, namespace: str, table: str, rows: Sequence[Sequence[object]]) -> None:
+        """Insert *rows* through the engine."""
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release the connection."""
 
 
 def sql_literal(value: object) -> str:

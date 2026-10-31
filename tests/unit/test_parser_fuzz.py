@@ -6,6 +6,7 @@ pinned by a regression test at the bottom.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from unittest import mock
+from unittest.mock import Mock
 
 import pytest
 from hypothesis import given
@@ -59,14 +61,16 @@ class _CatalogReached(Exception):
     pass
 
 
-class _UntouchableCatalog:
+def _untouchable_catalog() -> Catalog:
     """Dispatch stops at the first catalog call: everything before it is front end."""
+    catalog = Mock(spec_set=Catalog)
+    for name in dir(Catalog):
+        if not name.startswith("_") and callable(getattr(Catalog, name)):
+            getattr(catalog, name).side_effect = _CatalogReached(name)
+    return cast(Catalog, catalog)
 
-    def __getattr__(self, name: str) -> object:
-        raise _CatalogReached(name)
 
-
-_CATALOG = cast(Catalog, _UntouchableCatalog())
+_CATALOG = _untouchable_catalog()
 VIEW_DIALECTS = ("spark", "trino")
 
 
@@ -75,10 +79,8 @@ def _front_end(text: str, source_dialect: str) -> None:
     affected_tables_with_overrides(text, statements)
     for statement in statements:
         affected_views(statement)
-        try:
+        with contextlib.suppress(_CatalogReached):
             dispatch(_CATALOG, statement, view_dialects=VIEW_DIALECTS)
-        except _CatalogReached:
-            pass
 
 
 source_dialects = st.sampled_from(["spark", "trino", "postgres", "duckdb"])

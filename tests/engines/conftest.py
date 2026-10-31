@@ -16,6 +16,7 @@ a failed run can still dump the containers' logs).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import time
@@ -90,10 +91,8 @@ def _connect_when_ready(spec: EngineSpec, timeout: float) -> Engine:
         except Exception as err:
             last_err = err
             if engine is not None:
-                try:
+                with contextlib.suppress(Exception):
                     engine.close()
-                except Exception:
-                    pass
         time.sleep(5.0)
     msg = f"{spec.name} never answered its readiness query ({last_err!r})"
     raise TimeoutError(msg)
@@ -190,9 +189,7 @@ def saltation(
         views=ViewsConfig(dialects=[engine.view_dialect], source_dialect=engine.view_dialect),
     )
     yield SaltationProject(config=config)
-    try:
+    with contextlib.suppress(NoSuchNamespaceError, NamespaceNotEmptyError):
         for ident in rest_catalog.list_tables(sidecar):
             rest_catalog.drop_table(ident)
         rest_catalog.drop_namespace(sidecar)
-    except (NoSuchNamespaceError, NamespaceNotEmptyError):
-        pass
